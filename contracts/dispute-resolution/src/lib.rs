@@ -93,7 +93,7 @@ pub enum DataKey {
 // ── Domain types ──────────────────────────────────────────────────────────────
 
 /// Lifecycle state of a dispute.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
 pub enum DisputeStatus {
     /// Opened, awaiting evidence and arbitration.
@@ -385,9 +385,7 @@ impl DisputeResolutionContract {
         if amount <= 0 {
             panic!("amount must be positive");
         }
-        if env.caller() != escrow_contract {
-            panic!("unauthorized: caller is not the escrow contract");
-        }
+        escrow_contract.require_auth();
         let trusted_escrow: Address = env
             .storage()
             .persistent()
@@ -395,6 +393,20 @@ impl DisputeResolutionContract {
             .expect("escrow contract not set");
         if escrow_contract != trusted_escrow {
             panic!("unauthorized: escrow contract not registered");
+        }
+
+        // The escrow contract hands the disputed funds over to this contract
+        // before recording the dispute (the `amount` argument is documented as
+        // "already transferred"). A top-level caller cannot satisfy that
+        // precondition, so it cannot impersonate the escrow contract here.
+        let usdc: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcAddress)
+            .expect("not initialized");
+        let escrowed_balance = token::Client::new(&env, &usdc).balance(&env.current_contract_address());
+        if escrowed_balance < amount {
+            panic!("unauthorized: caller is not the escrow contract");
         }
 
         let id: u64 = env
@@ -647,7 +659,7 @@ impl DisputeResolutionContract {
             dispute.sender.clone()
         };
 
-        Self::settle_filing_fee(&env, dispute_id, &winner, &usdc);
+        Self::settle_filing_fee(&env, dispute_id, &winner, &usdc, true);
         token::Client::new(&env, &usdc).transfer(
             &env.current_contract_address(),
             &winner,
@@ -717,7 +729,7 @@ impl DisputeResolutionContract {
             dispute.sender.clone()
         };
 
-        Self::settle_filing_fee(&env, dispute_id, &winner, &usdc);
+        Self::settle_filing_fee(&env, dispute_id, &winner, &usdc, false);
         token::Client::new(&env, &usdc).transfer(
             &env.current_contract_address(),
             &winner,
@@ -812,7 +824,13 @@ impl DisputeResolutionContract {
             .set(&DataKey::FeeDistributorAddress, &fee_distributor);
     }
 
-    fn settle_filing_fee(env: &Env, dispute_id: u64, winner: &Address, usdc: &Address) {
+    fn settle_filing_fee(
+        env: &Env,
+        dispute_id: u64,
+        winner: &Address,
+        usdc: &Address,
+        refund_to_winner: bool,
+    ) {
         let fee_amount: i128 = env
             .storage()
             .persistent()
@@ -827,7 +845,7 @@ impl DisputeResolutionContract {
             .persistent()
             .get(&DataKey::FilingFeeHolder(dispute_id))
         {
-            if winner == &holder {
+            if refund_to_winner && winner == &holder {
                 token::Client::new(env, usdc).transfer(
                     &env.current_contract_address(),
                     winner,
@@ -1042,7 +1060,7 @@ impl DisputeResolutionContract {
                 dispute.sender.clone()
             };
 
-            Self::settle_filing_fee(&env, dispute_id, &winner, &usdc);
+            Self::settle_filing_fee(&env, dispute_id, &winner, &usdc, false);
             token::Client::new(&env, &usdc).transfer(
                 &env.current_contract_address(),
                 &winner,
@@ -1186,8 +1204,8 @@ impl DisputeResolutionContract {
             .unwrap_or_else(|| Vec::new(&env));
         
         let total = user_disputes.len();
-        let actual_start = if start as usize > total { total } else { start as usize };
-        let actual_end = if actual_start + capped_limit as usize > total { total } else { actual_start + capped_limit as usize };
+        let actual_start = if start > total { total } else { start };
+        let actual_end = if actual_start + capped_limit > total { total } else { actual_start + capped_limit };
         
         let mut result: Vec<u64> = Vec::new(&env);
         for i in actual_start..actual_end {

@@ -1,8 +1,10 @@
 #!/bin/bash
 
 # Soroban Contract Deployment Script
-# Supports: escrow, recurring-payments
-# Usage: [CONTRACT=recurring-payments] STELLAR_NETWORK=testnet SOROBAN_SECRET_KEY=<key> ./deploy.sh
+# Supports: escrow, recurring-payments, savings-vault, fee-distributor,
+#          dispute-resolution, kyc-attestation, agent-escrow,
+#          multisig-approval, loyalty-token, savings-circle
+# Usage: [CONTRACT=savings-circle] STELLAR_NETWORK=testnet SOROBAN_SECRET_KEY=<key> ./deploy.sh
 
 set -e
 
@@ -115,8 +117,12 @@ case "$TARGET_CONTRACT" in
     CONTRACT_NAME="loyalty_token_contract"
     CONTRACT_SUBDIR="loyalty-token"
     ;;
+  savings-circle)
+    CONTRACT_NAME="savings_circle_contract"
+    CONTRACT_SUBDIR="savings-circle"
+    ;;
   *)
-    echo -e "${RED}Unknown contract: $TARGET_CONTRACT. Valid options: escrow, recurring-payments, savings-vault, fee-distributor, dispute-resolution, kyc-attestation, agent-escrow, multisig-approval, loyalty-token${NC}"
+    echo -e "${RED}Unknown contract: $TARGET_CONTRACT. Valid options: escrow, recurring-payments, savings-vault, fee-distributor, dispute-resolution, kyc-attestation, agent-escrow, multisig-approval, loyalty-token, savings-circle${NC}"
     exit 1
     ;;
 esac
@@ -444,6 +450,23 @@ case "$TARGET_CONTRACT" in
     else
         echo -e "${RED}WARNING: Set ADMIN_ADDRESS and MAX_SUPPLY, then run:${NC}"
         echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --max_supply \$MAX_SUPPLY"
+    fi
+    ;;
+  savings-circle)
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${USDC_ADDRESS:-}" ]; then
+        FEE="${CIRCLE_FEE_BPS:-0}"
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" \
+            --token "$USDC_ADDRESS" \
+            --fee_bps "$FEE"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS, USDC_ADDRESS, and optionally CIRCLE_FEE_BPS (default 0), then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --token \$USDC_ADDRESS --fee_bps \${CIRCLE_FEE_BPS:-0}"
     fi
     ;;
 esac

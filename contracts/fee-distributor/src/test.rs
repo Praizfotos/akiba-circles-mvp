@@ -2,6 +2,7 @@
 
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
+    TryFromVal,
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env, IntoVal, Symbol, Val,
 };
@@ -20,7 +21,7 @@ fn setup() -> (Env, FeeDistributorContractClient<'static>, Address, Address) {
     let id = env.register_contract(None, FeeDistributorContract);
     let client = FeeDistributorContractClient::new(&env, &id);
     let admin = Address::generate(&env);
-    let usdc_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let usdc_id = env.register_stellar_asset_contract(admin.clone());
     client.initialize(&admin, &0);
     (env, client, admin, usdc_id)
 }
@@ -34,7 +35,7 @@ fn setup_with_split(
     let id = env.register_contract(None, FeeDistributorContract);
     let client = FeeDistributorContractClient::new(&env, &id);
     let admin = Address::generate(&env);
-    let usdc_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let usdc_id = env.register_stellar_asset_contract(admin.clone());
     client.initialize(&admin, &split_bps);
     (env, client, admin, usdc_id)
 }
@@ -125,15 +126,15 @@ fn test_deposit_fee_with_source_emits_event() {
     mint(&env, &usdc_id, &depositor, 500_0000000);
     client.deposit_fee(&depositor, &usdc_id, &500_0000000, &Some(source.clone()));
 
-    let event_name: Val = Symbol::new(&env, "FeeDeposited").into_val(&env);
+    let event_name = Symbol::new(&env, "FeeDeposited");
     let events = env.events().all();
     let deposit_event = events.iter().find(|(_, topics, _)| {
-        topics.iter().any(|t| t == &event_name)
+        topics.iter().any(|t| Symbol::try_from_val(&env, &t).ok().as_ref() == Some(&event_name))
     });
     assert!(deposit_event.is_some(), "FeeDeposited event not emitted");
 
     let (_, _, data) = deposit_event.unwrap();
-    let payload: EvtFeeDeposited = soroban_sdk::from_val(&env, data);
+    let payload: EvtFeeDeposited = soroban_sdk::FromVal::from_val(&env, &data);
     assert_eq!(payload.depositor, depositor);
     assert_eq!(payload.token, usdc_id);
     assert_eq!(payload.amount, 500_0000000);
@@ -147,15 +148,15 @@ fn test_deposit_fee_without_source_has_none() {
     mint(&env, &usdc_id, &depositor, 100_0000000);
     client.deposit_fee(&depositor, &usdc_id, &100_0000000, &None);
 
-    let event_name: Val = Symbol::new(&env, "FeeDeposited").into_val(&env);
+    let event_name = Symbol::new(&env, "FeeDeposited");
     let events = env.events().all();
     let deposit_event = events.iter().find(|(_, topics, _)| {
-        topics.iter().any(|t| t == &event_name)
+        topics.iter().any(|t| Symbol::try_from_val(&env, &t).ok().as_ref() == Some(&event_name))
     });
     assert!(deposit_event.is_some());
 
     let (_, _, data) = deposit_event.unwrap();
-    let payload: EvtFeeDeposited = soroban_sdk::from_val(&env, data);
+    let payload: EvtFeeDeposited = soroban_sdk::FromVal::from_val(&env, &data);
     assert_eq!(payload.source, None);
 }
 
@@ -248,15 +249,15 @@ fn test_withdraw_fees_event_includes_admin_amount_and_timestamp() {
     env.ledger().with_mut(|li| li.timestamp = withdraw_at);
     client.withdraw_fees(&admin, &usdc_id, &1_000_0000000);
 
-    let event_name: Val = Symbol::new(&env, "FeesWithdrawn").into_val(&env);
+    let event_name = Symbol::new(&env, "FeesWithdrawn");
     let events = env.events().all();
     let withdrawal_event = events.iter().find(|(_, topics, _)| {
-        topics.iter().any(|t| t == &event_name)
+        topics.iter().any(|t| Symbol::try_from_val(&env, &t).ok().as_ref() == Some(&event_name))
     });
     assert!(withdrawal_event.is_some(), "FeesWithdrawn event not emitted");
 
     let (_, _, data) = withdrawal_event.unwrap();
-    let payload: EvtFeesWithdrawn = soroban_sdk::from_val(&env, data);
+    let payload: EvtFeesWithdrawn = soroban_sdk::FromVal::from_val(&env, &data);
     assert_eq!(payload.admin, admin);
     assert_eq!(payload.token, usdc_id);
     assert_eq!(payload.amount, 1_000_0000000);
@@ -455,15 +456,15 @@ fn test_update_split_emits_split_updated_event() {
 
     client.update_split(&admin, &2500);
 
-    let event_name: Val = Symbol::new(&env, "SplitUpdated").into_val(&env);
+    let event_name = Symbol::new(&env, "SplitUpdated");
     let events = env.events().all();
     let split_event = events.iter().find(|(_, topics, _)| {
-        topics.iter().any(|t| t == &event_name)
+        topics.iter().any(|t| Symbol::try_from_val(&env, &t).ok().as_ref() == Some(&event_name))
     });
     assert!(split_event.is_some(), "SplitUpdated event not emitted");
 
     let (_, _, data) = split_event.unwrap();
-    let payload: EvtSplitUpdated = soroban_sdk::from_val(&env, data);
+    let payload: EvtSplitUpdated = soroban_sdk::FromVal::from_val(&env, &data);
     assert_eq!(payload.old_split_bps, 1000);
     assert_eq!(payload.new_split_bps, 2500);
 }
@@ -498,8 +499,7 @@ fn test_deposit_and_withdraw_xlm() {
 
     // Register a second asset to represent XLM (any SAC works in tests).
     let xlm_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     mint(&env, &xlm_id, &depositor, 500_0000000);
@@ -520,8 +520,7 @@ fn test_xlm_and_usdc_accumulators_are_independent() {
     let (env, client, admin, usdc_id) = setup();
 
     let xlm_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 1_000_0000000);
@@ -543,8 +542,7 @@ fn test_two_asset_selective_withdrawal() {
     let (env, client, admin, usdc_id) = setup();
 
     let xlm_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 1_000_0000000);
@@ -566,8 +564,7 @@ fn test_two_asset_both_withdrawals() {
     let (env, client, admin, usdc_id) = setup();
 
     let xlm_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 500_0000000);
@@ -602,8 +599,7 @@ fn test_over_withdrawal_xlm_panics() {
     let (env, client, admin, _usdc_id) = setup();
 
     let xlm_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     mint(&env, &xlm_id, &depositor, 50_0000000);
@@ -618,8 +614,7 @@ fn test_over_withdrawal_wrong_token_panics() {
     let (env, client, admin, usdc_id) = setup();
 
     let xlm_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 100_0000000);
@@ -657,8 +652,7 @@ fn test_get_all_accumulated_fees_two_tokens() {
     let (env, client, admin, usdc_id) = setup();
 
     let xlm_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 300_0000000);
@@ -686,8 +680,7 @@ fn test_get_all_accumulated_fees_excludes_fully_withdrawn_tokens() {
     let (env, client, admin, usdc_id) = setup();
 
     let xlm_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 100_0000000);
@@ -819,15 +812,15 @@ fn test_pause_emits_contract_paused_event() {
     env.ledger().with_mut(|li| li.timestamp = pause_at);
     client.pause(&admin);
 
-    let event_name: Val = Symbol::new(&env, "ContractPaused").into_val(&env);
+    let event_name = Symbol::new(&env, "ContractPaused");
     let events = env.events().all();
     let pause_event = events.iter().find(|(_, topics, _)| {
-        topics.iter().any(|t| t == &event_name)
+        topics.iter().any(|t| Symbol::try_from_val(&env, &t).ok().as_ref() == Some(&event_name))
     });
     assert!(pause_event.is_some(), "ContractPaused event not emitted");
 
     let (_, _, data) = pause_event.unwrap();
-    let payload: crate::EvtContractPaused = soroban_sdk::from_val(&env, data);
+    let payload: crate::EvtContractPaused = soroban_sdk::FromVal::from_val(&env, &data);
     assert_eq!(payload.admin, admin);
     assert_eq!(payload.paused_at, pause_at);
 }
@@ -841,15 +834,15 @@ fn test_unpause_emits_contract_unpaused_event() {
     env.ledger().with_mut(|li| li.timestamp = unpause_at);
     client.unpause(&admin);
 
-    let event_name: Val = Symbol::new(&env, "ContractUnpaused").into_val(&env);
+    let event_name = Symbol::new(&env, "ContractUnpaused");
     let events = env.events().all();
     let unpause_event = events.iter().find(|(_, topics, _)| {
-        topics.iter().any(|t| t == &event_name)
+        topics.iter().any(|t| Symbol::try_from_val(&env, &t).ok().as_ref() == Some(&event_name))
     });
     assert!(unpause_event.is_some(), "ContractUnpaused event not emitted");
 
     let (_, _, data) = unpause_event.unwrap();
-    let payload: crate::EvtContractUnpaused = soroban_sdk::from_val(&env, data);
+    let payload: crate::EvtContractUnpaused = soroban_sdk::FromVal::from_val(&env, &data);
     assert_eq!(payload.admin, admin);
     assert_eq!(payload.unpaused_at, unpause_at);
 }
@@ -904,9 +897,9 @@ fn test_get_all_accumulated_fees_pagination_returns_correct_page() {
     // together equal the full result returned with limit=100.
     let (env, client, admin, usdc_id) = setup();
 
-    let tok2 = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let tok3 = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let tok4 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let tok2 = env.register_stellar_asset_contract(admin.clone());
+    let tok3 = env.register_stellar_asset_contract(admin.clone());
+    let tok4 = env.register_stellar_asset_contract(admin.clone());
 
     let depositor = Address::generate(&env);
     for tok in [&usdc_id, &tok2, &tok3, &tok4] {
@@ -982,7 +975,7 @@ fn test_get_token_list_len_reflects_registered_tokens() {
     client.deposit_fee(&depositor, &usdc_id, &100_0000000, &None);
     assert_eq!(client.get_token_list_len(), 1);
 
-    let tok2 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let tok2 = env.register_stellar_asset_contract(admin.clone());
     mint(&env, &tok2, &depositor, 100_0000000);
     client.deposit_fee(&depositor, &tok2, &100_0000000, &None);
     assert_eq!(client.get_token_list_len(), 2);

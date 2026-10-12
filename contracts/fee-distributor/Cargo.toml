@@ -17,3 +17,14 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+# Toolchain compatibility shim (no SDK version change): soroban-env-common
+# 20.3.0 pins `ethnum = "=1.5.0"`, whose `src/error.rs` uses
+# `mem::transmute(())` to fabricate a `TryFromIntError`. Modern rustc (1.87+,
+# including this repo's 1.99 toolchain) rejects that with E0512 because
+# `TryFromIntError` is now 8 bits wide. `vendor/ethnum` is the unmodified
+# ethnum 1.5.0 source tree with only `src/error.rs` replaced by the upstream
+# 1.5.3 fix (same public API). It still reports version 1.5.0 so the exact
+# `=1.5.0` requirement is satisfied.
+[patch.crates-io]
+ethnum = { path = "vendor/ethnum" }

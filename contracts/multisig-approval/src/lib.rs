@@ -1,9 +1,10 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, crypto::Hash, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::xdr::ToXdr;
 
 mod test;
 
-const DEFAULT_PROPOSAL_TTL_SECS: u64 = 604_800; // 7 days
+const DEFAULT_PROPOSAL_TTL_SECS: u64 = 86_400; // 24 hours
 const EXPIRY_SECONDS: u64 = 86_400; // 24 hours
 const ROTATION_DELAY: u64 = 259_200; // 72 hours
 
@@ -14,7 +15,7 @@ const DEFAULT_SIGNER_WEIGHT: u32 = 1;
 const MAX_SIGNER_WEIGHT: u32 = 100;
 
 #[contracttype]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TxStatus {
     Pending,
     Executed,
@@ -120,7 +121,7 @@ impl MultisigContract {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
-        assert!(quorum > 0 && quorum as usize <= approvers.len(), "invalid quorum");
+        assert!(quorum > 0 && quorum <= approvers.len(), "invalid quorum");
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Approvers, &approvers);
@@ -200,15 +201,18 @@ impl MultisigContract {
 
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
-        // Rejected once the weight still available from signers who have not voted
-        // can no longer lift the current approval weight to quorum.
+        // Rejected once rejections reach quorum and the weight still available
+        // from signers who have not voted can no longer lift the current
+        // approval weight to quorum.
         let mut remaining_weight: u32 = 0;
         for a in approvers.iter() {
             if !env.storage().persistent().has(&DataKey::Voted(tx_id, a.clone())) {
                 remaining_weight += Self::signer_weight(&env, &a);
             }
         }
-        if proposal.approvals + remaining_weight < quorum {
+        if proposal.rejections >= quorum
+            && proposal.approvals + remaining_weight < quorum
+        {
             proposal.status = TxStatus::Rejected;
         }
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
@@ -221,7 +225,7 @@ impl MultisigContract {
         assert!(proposal.status == TxStatus::Pending, "not pending");
         
         if env.ledger().timestamp() <= proposal.expires_at {
-            panic!("Proposal has not expired yet");
+            panic!("Proposal has not yet expired");
         }
         
         proposal.status = TxStatus::Expired;
@@ -255,7 +259,7 @@ impl MultisigContract {
         proposer.require_auth();
         Self::assert_is_approver(&env, &proposer);
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
-        assert!(new_quorum > 0 && new_quorum as usize <= approvers.len(), "invalid quorum");
+        assert!(new_quorum > 0 && new_quorum <= approvers.len(), "invalid quorum");
 
         let id: u64 = env.storage().instance().get(&DataKey::QuorumCounter).unwrap();
         let proposal_ttl: u64 = env.storage().instance().get(&DataKey::ProposalTtl).unwrap_or(DEFAULT_PROPOSAL_TTL_SECS);
@@ -624,8 +628,9 @@ impl MultisigContract {
             Self::assert_is_approver(&env, &signer);
 
             // Verify ed25519 signature over the proposal hash
-            let pub_key: BytesN<32> = signer.to_xdr(&env)
-                .slice(signer.to_xdr(&env).len() - 32..)
+            let signer_xdr = signer.clone().to_xdr(&env);
+            let pub_key: BytesN<32> = signer_xdr
+                .slice(signer_xdr.len() - 32..)
                 .try_into()
                 .expect("Invalid signer public key");
             env.crypto().ed25519_verify(&pub_key, &Bytes::from(hash.clone()), &sig);

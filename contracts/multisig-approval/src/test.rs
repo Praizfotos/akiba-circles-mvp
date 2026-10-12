@@ -813,6 +813,7 @@ fn test_quorum_greater_than_approver_count_panics() {
 }
 
 #[test]
+#[should_panic(expected = "invalid quorum")]
 fn test_quorum_change_to_unreachable_via_propose_rejected() {
     // Issue #1057: Attempting to propose a quorum higher than remaining approvers
     // must be rejected at propose time to prevent a permanently stuck contract.

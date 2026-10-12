@@ -27,9 +27,7 @@ fn setup() -> (
     let admin = Address::generate(&env);
     let arbitrator = Address::generate(&env);
     let super_arbitrator = Address::generate(&env);
-    let usdc_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+    let usdc_id = env.register_stellar_asset_contract(admin.clone());
     client.initialize(&admin, &arbitrator, &usdc_id, &256u32, &super_arbitrator);
     (env, client, admin, arbitrator, usdc_id, super_arbitrator)
 }
@@ -294,7 +292,10 @@ fn test_resolve_for_sender_refunds_sender() {
     env.ledger().with_mut(|li| li.timestamp += 24 * 60 * 60 + 1);
     client.finalize_resolution(&id);
 
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&sender), amount);
+    assert_eq!(
+        TokenClient::new(&env, &usdc_id).balance(&sender),
+        amount + DEFAULT_FILING_FEE
+    );
     assert_eq!(client.get_dispute(&id).status, DisputeStatus::ResolvedForSender);
 }
 

@@ -1,83 +1,97 @@
 # Smart Contracts
 
-This directory contains Soroban smart contracts for the AfriPay cross-border payment platform.
+Soroban smart contracts for **Akiba Circles** (and the inherited payment
+foundation this repository was built on).
 
-## Contracts
+## Status
 
-| Contract | Description | Docs |
+Every crate is pinned to **`soroban-sdk = "20.5.0"`** — this is deliberate.
+Do not upgrade the SDK in one crate without a repo-wide decision; several
+crates were originally written against SDK 21/22 APIs and that mismatch is
+what broke them.
+
+| Contract | Description | `cargo test` |
 |---|---|---|
-| `escrow/` | Three-party (sender/recipient/agent) trustless escrow for USDC remittances | [README](./escrow/README.md) |
-| `agent-escrow/` | Trustless agent-mediated escrow variant for cross-border remittances | [README](./agent-escrow/README.md) |
-| `dispute-resolution/` | On-chain three-party dispute resolution for escrowed payments | — |
-| `fee-distributor/` | On-chain platform fee accumulation and withdrawal | — |
-| `kyc-attestation/` | On-chain KYC status via SHA-256 hash (no raw PII stored on-chain) | — |
-| `loyalty-token/` | SEP-41 compatible fungible loyalty token with tiered fee-discount redemption | — |
-| `multisig-approval/` | Multisig proposal approval and signer key rotation | — |
-| `recurring-payments/` | User-authorized recurring transfers without giving the contract custody of funds | [README](./recurring-payments/README.md) |
-| `savings-vault/` | On-chain savings deposit/withdrawal vault | — |
+| `savings-circle/` | **Rotating savings circles — the Akiba Circles core contract** | ✅ **implemented** — 41/41 tests green ([docs](./savings-circle/README.md)) |
+| `escrow/` | Three-party (sender/recipient/agent) trustless escrow, batch creation, KYC/dispute hooks | ✅ 68 passed |
+| `dispute-resolution/` | Three-party on-chain arbitration with appeals and quorum voting | ✅ 56 passed |
+| `fee-distributor/` | Platform fee accumulation, split routing, agent pool, pause | ✅ 71 passed |
+| `kyc-attestation/` | Tiered on-chain KYC status via SHA-256 hash (no raw PII) | ✅ 31 passed |
+| `savings-vault/` | Time-locked savings vault with interest/yield distribution | ✅ 51 passed |
+| `recurring-payments/` | User-authorized recurring transfers (allowance-based, non-custodial) | ✅ 51 passed |
+| `multisig-approval/` | Weighted multisig proposals, quorum changes, signer rotation timelock | ✅ 81 passed |
+| `agent-escrow/` | Agent-mediated escrow variant with insurance fund | ❌ tests don't compile — **[good first issue](../docs/ROADMAP.md)** |
+| `loyalty-token/` | SEP-41 loyalty token with tiered redemption | ❌ tests don't compile — **[good first issue](../docs/ROADMAP.md)** |
 
-Each contract is an independent crate — see its `Cargo.toml` and `src/lib.rs` for details where a dedicated README isn't yet written.
+`agent-escrow` and `loyalty-token` are intentionally left open: their
+`src/test.rs` suites are complete and act as the specification — the missing
+functions (`update_admin`, `insurance_payout`, `get_insurance_balance` /
+`set_tier`, `get_tier`, `get_discount`, plus `redeem`'s return type) just need
+to be implemented in `lib.rs`. Fixing them is an ideal first contribution.
 
-**Deployment:** [deploy.sh](./deploy.sh)
+## Layout
+
+Each contract is an **independent crate** (no workspace): its own
+`Cargo.toml`, `src/lib.rs`, `src/test.rs`. CI
+(`.github/workflows/ci.yml`) globs `contracts/*/Cargo.toml`, builds each to
+`wasm32-unknown-unknown`, and runs `cargo test`.
+
+Generated artifacts (`target/`, `Cargo.lock`, `test_snapshots/`, `*.wasm`,
+`deployments/`) are gitignored — never commit them.
 
 ## Building
 
 ```bash
-cd <contract-dir>   # e.g. escrow, fee-distributor, savings-vault, ...
-cargo build --release --target wasm32-unknown-unknown
-cargo test
+cargo build --release --target wasm32-unknown-unknown --manifest-path contracts/<crate>/Cargo.toml
+cargo test --manifest-path contracts/<crate>/Cargo.toml
 ```
+
+Prerequisites: Rust (stable), `rustup target add wasm32-unknown-unknown`,
+and the `stellar` CLI for deployment.
 
 ## Deployment
 
 ```bash
-export SOROBAN_SECRET_KEY='your-secret-key'
-bash deploy.sh
+export SOROBAN_SECRET_KEY='S...'
+bash contracts/deploy.sh --network testnet
 ```
 
-See [deploy.sh](./deploy.sh) for detailed deployment instructions and network configuration.
+`deploy.sh` builds, optimizes, deploys, and **immediately initializes** each
+contract (atomic deploy+init prevents initialization front-running), then
+writes `deployments/testnet_contract_ids.json` and `contracts/.env`.
 
-## Development
+> Known gaps in `deploy.sh` are tracked in [`docs/KNOWN_ISSUES.md`](../docs/KNOWN_ISSUES.md)
+> (wrong init args for `dispute-resolution` / `fee-distributor`).
+> PRs fixing the script are welcome. (`savings-circle` deploy+init is wired.)
 
-### Prerequisites
-- Rust 1.70+
-- Soroban CLI
-- wasm32 target: `rustup target add wasm32-unknown-unknown`
+## Upgradeability
 
-### Testing
-```bash
-cd <contract-dir>
-cargo test
-```
+Only `escrow` exposes an on-chain `upgrade()` + `migrate()` pair
+(`contracts/escrow/src/lib.rs`). `UPGRADING.md` describes the intended
+timelock flow; the backend announce/execute endpoints exist but the on-chain
+execution path is DB-only today — see `docs/KNOWN_ISSUES.md`.
 
-### Building for Production
-```bash
-cd <contract-dir>
-cargo build --release --target wasm32-unknown-unknown
-```
+## Security conventions
 
-## Integration
+What reviewers expect to see in this repo:
 
-The escrow contract is designed to integrate with the AfriPay backend to replace the centralized payment logic with trustless on-chain operations.
-
-### Backend Integration Steps
-1. Deploy the contract and save the contract ID
-2. Update backend environment variables with `ESCROW_CONTRACT_ID` and `ESCROW_USDC_ADDRESS`
-3. Modify payment controller to invoke contract functions instead of direct transfers
-4. Listen for escrow events on Stellar for state synchronization
-
-### Next Steps
-1. Test on Stellar testnet
-2. Get security audit from Soroban auditors
-3. Deploy to mainnet
-4. Gradual migration of escrow operations from backend to contract
+- `require_auth()` on every privileged entry point; admin = stored-address
+  equality check (see `require_admin` helpers).
+- Checks-effects-interactions ordering before every token transfer.
+- Argument validation at the boundary with predictable errors.
+- No TTL extension anywhere yet — contracts document their archival
+  assumption rather than pretending otherwise.
+- `savings-circle` is the repo's reference for the modern convention:
+  `#[contracterror]` + `panic_with_error!` instead of bare `panic!("...")`.
+  New crates should copy its error-handling pattern.
 
 ## Resources
 
 - [Soroban Docs](https://soroban.stellar.org)
 - [Stellar Expert](https://stellar.expert)
-- [USDC on Stellar](https://www.circle.com/usdc-on-stellar)
+- [savings-circle spec](./savings-circle/README.md)
+- [Roadmap / contribution tasks](../docs/ROADMAP.md)
 
 ## License
 
-See root LICENSE file.
+MIT (see root README).

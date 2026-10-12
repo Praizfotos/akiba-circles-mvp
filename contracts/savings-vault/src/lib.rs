@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec};
 
 mod test;
 
@@ -127,6 +127,8 @@ pub enum DataKey {
     EmergencyActivatedAt,
     MinLockSecs,
     MaxLockSecs,
+    /// Registry of all depositors (for proportional yield distribution).
+    Depositors,
 }
 
 const SECONDS_PER_YEAR: u64 = 31_536_000;
@@ -149,8 +151,8 @@ impl SavingsVaultContract {
         env.storage().persistent().set(&DataKey::TotalLocked, &0i128);
         env.storage().persistent().set(&DataKey::InterestReserve, &0i128);
         env.storage().persistent().set(&DataKey::InterestRateBps, &0u32);
-        env.storage().persistent().set(&DataKey::MinLockSecs, &86400u64);
-        env.storage().persistent().set(&DataKey::MaxLockSecs, &31536000u64);
+        env.storage().persistent().set(&DataKey::MinLockSecs, &3600u64);
+        env.storage().persistent().set(&DataKey::MaxLockSecs, &63_072_000u64);
     }
 
     /// Set the annual interest rate. Only admin may call this.
@@ -390,12 +392,13 @@ impl SavingsVaultContract {
             panic!("unauthorized: caller is not admin");
         }
 
-        let existing: u64 = env
+        // Key presence (not a value sentinel) marks "announced": a valid
+        // announcement timestamp can be 0 (test/dev networks start at t=0).
+        if env
             .storage()
             .persistent()
-            .get(&DataKey::EmergencyWithdrawalAnnounced)
-            .unwrap_or(0u64);
-        if existing != 0 {
+            .has(&DataKey::EmergencyWithdrawalAnnounced)
+        {
             panic!("emergency already announced");
         }
 
@@ -422,14 +425,14 @@ impl SavingsVaultContract {
             panic!("unauthorized: caller is not admin");
         }
 
-        let announced_at: u64 = env
+        let announced_at: u64 = match env
             .storage()
             .persistent()
             .get(&DataKey::EmergencyWithdrawalAnnounced)
-            .unwrap_or(0u64);
-        if announced_at == 0 {
-            panic!("no emergency announced");
-        }
+        {
+            Some(t) => t,
+            None => panic!("no emergency announced"),
+        };
 
         let now = env.ledger().timestamp();
         if now < announced_at.saturating_add(172_800) {
@@ -491,14 +494,14 @@ impl SavingsVaultContract {
             panic!("unauthorized: caller is not admin");
         }
 
-        let announced_at: u64 = env
+        let announced_at: u64 = match env
             .storage()
             .persistent()
             .get(&DataKey::EmergencyWithdrawalAnnounced)
-            .unwrap_or(0u64);
-        if announced_at == 0 {
-            panic!("no emergency announced");
-        }
+        {
+            Some(t) => t,
+            None => panic!("no emergency announced"),
+        };
 
         let now = env.ledger().timestamp();
         if now >= announced_at.saturating_add(172_800) {
@@ -507,7 +510,7 @@ impl SavingsVaultContract {
 
         env.storage()
             .persistent()
-            .set(&DataKey::EmergencyWithdrawalAnnounced, &0u64);
+            .remove(&DataKey::EmergencyWithdrawalAnnounced);
         env.events().publish(
             (Symbol::new(&env, "EmergencyCancelled"),),
             EmergencyCancelledEvent { admin, timestamp: now },
@@ -642,7 +645,10 @@ impl SavingsVaultContract {
                 AccrueInterestEvent {
                     user,
                     interest,
-                    new_balance: vault.balance,
+                    new_balance: vault
+                        .balance
+                        .checked_add(vault.accrued_interest)
+                        .expect("accrued balance overflow"),
                 },
             );
         }
@@ -669,8 +675,8 @@ impl SavingsVaultContract {
             panic!("Unlock time must be in the future");
         }
 
-        let min_lock_secs: u64 = env.storage().persistent().get(&DataKey::MinLockSecs).unwrap_or(86400);
-        let max_lock_secs: u64 = env.storage().persistent().get(&DataKey::MaxLockSecs).unwrap_or(31536000);
+        let min_lock_secs: u64 = env.storage().persistent().get(&DataKey::MinLockSecs).unwrap_or(3600);
+        let max_lock_secs: u64 = env.storage().persistent().get(&DataKey::MaxLockSecs).unwrap_or(63_072_000);
         let now = env.ledger().timestamp();
         let min_unlock = now + min_lock_secs;
         let max_unlock = now + max_lock_secs;
@@ -685,8 +691,9 @@ impl SavingsVaultContract {
             .get(&DataKey::TokenAddress)
             .expect("Contract not initialized");
 
-        token::Client::new(&env, &token_address).transfer_from(
-            &env.current_contract_address(),
+        // user.require_auth() above authorizes this pull; direct transfer avoids
+        // requiring callers to pre-approve a token allowance for the contract.
+        token::Client::new(&env, &token_address).transfer(
             &user,
             &env.current_contract_address(),
             &amount,
@@ -726,6 +733,19 @@ impl SavingsVaultContract {
         env.storage()
             .persistent()
             .set(&DataKey::TotalLocked, &new_total);
+
+        // Track depositors so distribute_yield can credit yield proportionally.
+        let mut depositors: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Depositors)
+            .unwrap_or(Vec::new(&env));
+        if !depositors.contains(&user) {
+            depositors.push_back(user.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::Depositors, &depositors);
+        }
 
         env.events().publish(
             (Symbol::new(&env, "Deposit"),),
@@ -886,6 +906,7 @@ impl SavingsVaultContract {
             .get(&DataKey::TotalLocked)
             .unwrap_or(0);
 
+        let mut recipient_count: u32 = 0;
         if total_locked == 0 {
             // No active vaults, transfer to admin
             let admin: Address = env
@@ -898,6 +919,45 @@ impl SavingsVaultContract {
                 &admin,
                 &amount,
             );
+        } else {
+            // Credit each depositor's share of the yield proportional to their
+            // vault balance at the time of distribution. Claiming later pays out
+            // and zeroes the credited amount.
+            let depositors: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Depositors)
+                .unwrap_or(Vec::new(&env));
+            for depositor in depositors.iter() {
+                let vault: Vault = match env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Vault(depositor.clone()))
+                {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if vault.balance <= 0 {
+                    continue;
+                }
+                let share = amount
+                    .checked_mul(vault.balance)
+                    .and_then(|v| v.checked_div(total_locked))
+                    .expect("yield share calculation overflow");
+                if share <= 0 {
+                    continue;
+                }
+                let accrued: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::YieldAccrued(depositor.clone()))
+                    .unwrap_or(0);
+                let new_accrued = accrued.checked_add(share).expect("yield accrued overflow");
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::YieldAccrued(depositor.clone()), &new_accrued);
+                recipient_count = recipient_count.saturating_add(1);
+            }
         }
 
         env.events().publish(
@@ -905,7 +965,7 @@ impl SavingsVaultContract {
             YieldDistributed {
                 total_amount: amount,
                 distributor,
-                recipient_count: 0, // Proportional distribution happens on-claim
+                recipient_count,
             },
         );
     }
@@ -980,8 +1040,8 @@ impl SavingsVaultContract {
             panic!("min_secs must be less than max_secs");
         }
 
-        let old_min: u64 = env.storage().persistent().get(&DataKey::MinLockSecs).unwrap_or(86400);
-        let old_max: u64 = env.storage().persistent().get(&DataKey::MaxLockSecs).unwrap_or(31536000);
+        let old_min: u64 = env.storage().persistent().get(&DataKey::MinLockSecs).unwrap_or(3600);
+        let old_max: u64 = env.storage().persistent().get(&DataKey::MaxLockSecs).unwrap_or(63_072_000);
 
         env.storage().persistent().set(&DataKey::MinLockSecs, &min_secs);
         env.storage().persistent().set(&DataKey::MaxLockSecs, &max_secs);

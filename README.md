@@ -1,528 +1,244 @@
-# AfriPay — Cross-Border Payment App for Africa
+# Akiba Circles — On-Chain Rotating Savings Circles for Africa
 
-A production-ready cross-border remittance platform built on the **Stellar Network**, enabling fast, secure, and low-cost payments across African countries using USDC stablecoin and XLM.
+**Akiba Circles** brings the *esusu / tontine / stokvel / susu* — the rotating
+savings circles that millions of African and diaspora households already use —
+on-chain on **Stellar**, so the group no longer has to trust a human collector
+with a bag of cash.
 
-AfriPay connects senders with registered payout agents who handle local fiat distribution, with the Stellar blockchain managing escrow, fee collection, and settlement. Designed for emerging markets where stablecoin remittance rails can significantly reduce cross-border payment costs.
-
----
-
-## Overview
-
-AfriPay implements an escrow-based remittance flow on Stellar:
-
-1. A sender creates a remittance by depositing USDC/XLM into escrow via the Stellar network.
-2. A registered payout agent handles fiat distribution to the recipient off-chain.
-3. The agent confirms payout on-chain via the backend.
-4. The platform releases funds to the agent minus a configurable platform fee.
-5. Platform fees accumulate and are managed by the admin.
-
-The system is transparent, auditable on Stellar Explorer, and modular enough to extend with Soroban smart contracts.
+> **Status:** mid-transformation, built for contributors. Phase 1 (contract
+> remediation) is done and green; the core `savings-circle` contract is
+> [fully specified and waiting for an implementer](contracts/savings-circle/README.md).
+> See [`docs/ROADMAP.md`](docs/ROADMAP.md). This project is community-built and
+> is **not** affiliated with, or endorsed by, the Stellar Development
+> Foundation or any ecosystem program.
 
 ---
 
-## Key Features
+## The problem
 
-- **Escrow-Based Transfers** — Secure USDC/XLM deposits held until payout confirmation
-- **Agent Network** — Registered agents handle fiat distribution off-chain
-- **Automated Fee Collection** — Platform fees calculated and accumulated automatically
-- **Multi-Status Tracking** — Remittances tracked through Pending, Completed, and Cancelled states
-- **Authorization Security** — JWT-based role access control for all operations
-- **QR Payment Generator** — Shareable QR codes for wallet addresses
-- **Contact List** — Save frequent recipients for quick transfers
-- **Fraud Protection** — Rate limiting and transaction velocity checks
-- **Event Logging** — All transactions stored in PostgreSQL and linked to Stellar Explorer
-- **Cancellation Support** — Senders can cancel pending remittances
-- **Multi-Currency UI** — Display estimated values in NGN, GHS, KES, USD
+A rotating savings circle works like this: 10 people each contribute $100
+every week; each week one person walks away with $1,000, cycling through the
+group until everyone has received. It is one of the most common savings
+mechanisms in Africa — and it has one structural flaw: **the collector holds
+all the cash.** Collectors abscond, pay late, lose records, or "forget" whose
+turn it is. Diaspora members participating from abroad have even less
+visibility.
+
+## The solution
+
+The collector becomes a Soroban smart contract:
+
+- Contributions (USDC) are pulled on-chain into the circle's account.
+- The payout rotation is deterministic and auditable — join order, enforced
+  by the contract, not memory.
+- A member who misses a contribution is **dropped**: they forfeit their
+  collateral to the pot, and the remaining members see it in their payout.
+- Anyone can call `rollover` when a cycle deadline passes — no single keeper.
+- The platform takes a small, configurable fee on pot payouts; nothing else.
+
+The contract eliminates *collector risk* and enforces *schedule and rotation*.
+Residual *member credit risk* (someone who receives their pot and then quits)
+is mitigated by drop-and-forfeit — and, honestly, by the same social fabric
+that makes these circles work today. We document that assumption rather than
+pretend it away.
+
+**Why Stellar/Soroban?** Sub-cent fees make weekly micro-contributions
+economical; USDC is the de-facto settlement asset for African cross-border
+value; and Soroban gives us deterministic on-chain enforcement of the rotation
+state machine with Rust-grade testability. A classic (non-smart-contract)
+Stellar rail cannot express per-cycle membership state; an off-chain database
+cannot eliminate the collector.
+
+## Who it's for
+
+- Savings circle members and organizers (market associations, burial societies,
+  family groups, salary earners' associations)
+- Diaspora participants contributing to circles back home
+- Developers building on Stellar who want a reusable group-coordination
+  primitive
 
 ---
+
+## Repository structure
+
+| Path | What it is |
+|---|---|
+| `contracts/` | Independent Soroban crates (Rust/WASM). **`savings-circle/` is the new core — spec only.** See [`contracts/README.md`](contracts/README.md) for per-crate status. |
+| `backend/` | Express + PostgreSQL API: auth (JWT/2FA/WebAuthn), wallets, payments, fraud/AML, compliance, cron jobs, ~209 routes |
+| `frontend/` | React 18 (CRA) + Tailwind SPA; i18n (en/fr/sw/ha/yo); offline queue; service worker |
+| `database/` | Bootstrap schema + 95 `node-pg-migrate` migrations |
+| `e2e/` | Playwright suites (send/receive/history/user-journey; auth spec is an open task) |
+| `docs/` | [`ROADMAP.md`](docs/ROADMAP.md) · [`KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) · runbooks · security reports |
+| `scripts/` | Integration verification helpers |
+
+**Heritage:** this repository was formerly *AfriPay*, a custodial
+cross-border remittance platform. Its engineering foundation — auth,
+compliance, observability, CI, and seven of its nine smart contracts — is
+preserved intact (with the original Git history and contributor attribution);
+the product direction is now savings circles. Details of what changed:
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## Architecture
 
-### Stack
+| Layer | Technology |
+|---|---|
+| Contracts | Rust, `soroban-sdk` **20.5.0** (pinned — do not upgrade casually), wasm32 |
+| Backend | Node 20, Express, `@stellar/stellar-sdk` v12 (Horizon + Soroban RPC), PostgreSQL 16, Redis/BullMQ |
+| Frontend | React 18, CRA, Tailwind, react-router 6, axios, i18next |
+| Wallets | Server-custodial today (AES-256-encrypted keys, PIN/TOTP gated export); browser-wallet migration is future work |
+| Infra | Docker Compose, GitHub Actions CI, Prometheus/Grafana, Sentry |
 
-| Layer      | Technology                          |
-|------------|-------------------------------------|
-| Frontend   | React 18, Tailwind CSS              |
-| Backend    | Node.js, Express.js                 |
-| Blockchain | Stellar SDK, Horizon API            |
-| Database   | PostgreSQL                          |
-| Auth       | JWT + bcrypt                        |
-| Network    | Stellar Testnet / Mainnet           |
+### Smart contracts
 
-### Project Structure
+| Crate | Purpose | `cargo test` |
+|---|---|---|
+| `savings-circle` | **Rotating savings circles — Akiba Circles core** | 📋 [spec](contracts/savings-circle/README.md) |
+| `escrow` | 3-party remittance escrow, batch, KYC/dispute hooks | ✅ 68 |
+| `dispute-resolution` | On-chain arbitration + appeals + quorum | ✅ 56 |
+| `fee-distributor` | Fee accumulation & split routing | ✅ 71 |
+| `kyc-attestation` | Tiered KYC status (hash-only, no PII) | ✅ 31 |
+| `savings-vault` | Time-locked savings + yield | ✅ 51 |
+| `recurring-payments` | Allowance-based recurring transfers | ✅ 51 |
+| `multisig-approval` | Weighted multisig + signer rotation | ✅ 81 |
+| `agent-escrow` | Agent-mediated escrow + insurance fund | ❌ open task |
+| `loyalty-token` | SEP-41 loyalty token | ❌ open task |
 
-```
-├── backend/
-│   ├── src/
-│   │   ├── controllers/
-│   │   │   ├── authController.js       # Register, login, JWT issuance
-│   │   │   ├── walletController.js     # Balance, QR code, transactions
-│   │   │   ├── paymentController.js    # Send payments, history, fraud check
-│   │   │   └── contactsController.js  # Frequent contacts CRUD
-│   │   ├── middleware/
-│   │   │   └── auth.js                 # JWT verification middleware
-│   │   ├── routes/
-│   │   │   ├── auth.js
-│   │   │   ├── wallet.js
-│   │   │   └── payments.js
-│   │   ├── services/
-│   │   │   └── stellar.js              # Wallet generation, signing, broadcasting
-│   │   ├── db.js                       # PostgreSQL connection pool
-│   │   └── index.js                    # Express app entry point
-│   ├── .env.example
-│   └── package.json
-├── frontend/
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── Welcome.jsx             # Onboarding screen
-│   │   │   ├── Register.jsx            # Sign up + wallet creation
-│   │   │   ├── Login.jsx               # Authentication
-│   │   │   ├── Dashboard.jsx           # Balance, recent activity, currency toggle
-│   │   │   ├── SendMoney.jsx           # Send with two-step confirmation
-│   │   │   ├── ReceiveMoney.jsx        # QR code + address sharing
-│   │   │   ├── TransactionHistory.jsx  # Full history with filters
-│   │   │   └── Profile.jsx             # User info + contacts management
-│   │   ├── components/
-│   │   │   └── Layout.jsx              # Mobile bottom nav shell
-│   │   ├── context/
-│   │   │   └── AuthContext.jsx         # Global auth state
-│   │   └── utils/
-│   │       ├── api.js                  # Axios instance with JWT interceptor
-│   │       └── currency.js             # XLM conversion rates + formatters
-│   ├── .env.example
-│   └── package.json
-├── contracts/                           # Soroban smart contracts (Rust/WASM), one crate per dir
-│   ├── escrow/                         # Three-party (sender/recipient/agent) remittance escrow
-│   ├── agent-escrow/                   # Trustless agent-mediated escrow variant
-│   ├── dispute-resolution/             # On-chain three-party dispute resolution
-│   ├── fee-distributor/                # Platform fee accumulation & withdrawal
-│   ├── kyc-attestation/                # On-chain KYC status (SHA-256 hash, no raw PII)
-│   ├── loyalty-token/                  # SEP-41 fungible loyalty token + tiered redemption
-│   ├── multisig-approval/              # Multisig proposal approval & key rotation
-│   ├── recurring-payments/             # User-authorized recurring transfers (non-custodial)
-│   ├── savings-vault/                  # On-chain savings deposit/withdrawal vault
-│   ├── README.md                       # Contracts directory guide
-│   ├── deploy.sh                       # Deployment script for all contracts
-│   └── .gitignore
-└── database/
-    └── schema.sql                      # PostgreSQL tables + indexes
-```
-
-### Storage Model
-
-**PostgreSQL Tables:**
-- `users` — Account credentials and profile
-- `wallets` — Stellar public key + AES-256 encrypted secret key
-- `transactions` — All remittance records with status tracking
-- `contacts` — Saved frequent recipients per user
-
-### Fee Model
-
-Platform fees are calculated using basis points (bps):
-
-```
-fee = amount * fee_bps / 10000
-
-Examples:
-  250 bps = 2.5%
-  500 bps = 5.0%
-```
+**Total: 378 contract unit tests passing** across seven crates. The two ❌
+crates have complete test suites that act as specs — implementing the missing
+functions is an ideal first contribution ([good first issues](docs/ROADMAP.md)).
 
 ---
 
-## Stellar Protocol Compatibility
+## Getting started
 
-AfriPay targets **Stellar Protocol 19+**. Note that the inflation operation was removed in **Protocol 12 (2019)** and is not used anywhere in this codebase. No `setOptions` calls set an `inflationDest`. Any SDK examples referencing inflation are outdated and should be ignored.
+### Prerequisites
 
----
+- Docker + Docker Compose **or** Node 20, PostgreSQL 16, Redis
+- Rust stable + `rustup target add wasm32-unknown-unknown` (contracts)
+- `stellar` CLI (deployment)
 
-## Compliance — Asset Clawback
-
-For regulatory compliance (fraud investigations, court orders), AfriPay supports the Stellar **clawback** operation on USDC assets. This allows the asset issuer to reclaim tokens from a user's account when legally required.
-
-- Endpoint: `POST /api/admin/clawback` (admin-only)
-- Requires the issuer account to have `AUTH_CLAWBACK_ENABLED_FLAG` set on-chain
-- All clawback operations are recorded in the audit log with reason, amount, and transaction hash
-- Configure `ISSUER_PUBLIC_KEY` and `ISSUER_ENCRYPTED_SECRET_KEY` in your `.env`
-
----
-
-### Wallet Generation
-
-On registration, a Stellar keypair is automatically generated:
-- Public key stored in the database
-- Secret key encrypted with AES-256-CBC before storage
-- Account funded via Friendbot on testnet
-
-### Transaction Flow
-
-```
-Sender → [approve USDC transfer] → Backend → [sign with keypair]
-       → Stellar Horizon API → [broadcast transaction]
-       → Transaction hash stored in DB
-       → Visible on Stellar Expert Explorer
-```
-
-### Supported Assets
-
-- `XLM` — Native Stellar Lumens
-- `USDC` — USD Coin on Stellar
-- Display conversion: NGN, GHS, KES, USD
-
----
-
-
-- A Stellar testnet account (auto-created on registration)
-
-### 1. Database
-```bash
-psql -U postgres -c "CREATE DATABASE cbpa_db;"
-```
-
-Then run migrations (see Database Migrations below).
-
-### 2. Backend
+### Quick start (Docker)
 
 ```bash
-cd backend
-npm install
-cp .env.example .env
-# Fill in your values (see Environment Variables below)
-npm run dev
-# Server starts on http://localhost:5000
+cp backend/.env.example backend/.env       # fill in JWT_SECRET, ENCRYPTION_KEY, …
+cp frontend/.env.example frontend/.env
+docker compose up --build
+# frontend: http://localhost:3000   backend: http://localhost:5000
 ```
 
-### 2. Docker Compose (Recommended)
+Database migrations run automatically on backend boot
+(`npm run migrate`), or manually:
 
-1. Copy `.env.example` to `.env` and customize:
-   ```
-   cp .env.example .env
-   ```
-
-2. Start full stack:
-   ```
-   docker compose up -d --build
-   ```
-
-3. Access:
-   - Frontend: http://localhost:3000
-   - Backend API: http://localhost
-
-AfriPay uses [node-pg-migrate](https://github.com/salsita/node-pg-migrate) for schema version control. All schema changes must be made as numbered migration files inside `database/migrations/` — never by editing `schema.sql` directly.
-
-### Run migrations
 ```bash
-cd backend
-npm run migrate
+cd backend && npm run migrate
 ```
 
-### Roll back the last migration
+### Contracts
+
 ```bash
-cd backend
-npm run migrate:rollback
+cargo build --release --target wasm32-unknown-unknown --manifest-path contracts/escrow/Cargo.toml
+cargo test --manifest-path contracts/escrow/Cargo.toml        # repeat per crate
 ```
 
-### Adding a new migration
+### Tests
 
-Create a new file in `database/migrations/` following the naming convention:
-```
-002_your_migration_name.js
-```
-
-Each file must export an `up` and a `down` function:
-```js
-exports.up = (pgm) => {
-  // forward changes
-};
-
-exports.down = (pgm) => {
-  // reverse changes
-};
+```bash
+cd backend  && npm test          # Jest unit + integration (STELLAR_NETWORK=mock in CI)
+cd frontend && CI=true npm test  # CRA Jest
+npm run test:e2e                 # Playwright (needs running stack)
 ```
 
-node-pg-migrate tracks applied migrations in a `pgmigrations` table that it creates automatically. Never delete or edit this table manually.
+CI (`.github/workflows/ci.yml`) additionally gates on duplicate-route checks,
+migration-prefix checks, and per-crate WASM builds.
+
+### Key environment variables
+
+| Variable | Where | Notes |
+|---|---|---|
+| `DATABASE_URL`, `JWT_SECRET`, `ENCRYPTION_KEY` | backend | required; `ENCRYPTION_KEY` = 32 chars |
+| `STELLAR_NETWORK` | backend/frontend | `testnet` / `mainnet` |
+| `SOROBAN_RPC_URL` | backend | Soroban RPC endpoint |
+| `SAVINGS_CIRCLE_CONTRACT_ID` | backend | *(planned — Phase 3)* |
+| `ESCROW_CONTRACT_ID`, `AGENT_ESCROW_CONTRACT_ID`, … | backend | per-contract IDs from deployment |
+| `REACT_APP_API_URL`, `REACT_APP_STELLAR_NETWORK` | frontend | see `frontend/.env.example` |
+
+Full lists: `backend/.env.example`, `frontend/.env.example`. **Never commit
+real `.env` files, seed phrases, or secret keys.**
 
 ---
 
-## API Endpoints
+## Deploying contracts to Stellar Testnet
 
-| Method | Endpoint                  | Auth | Description                        |
-|--------|---------------------------|------|------------------------------------|
-| POST   | /api/auth/register        | No   | Register user + auto-create wallet |
-| POST   | /api/auth/login           | No   | Login, receive JWT                 |
-| GET    | /api/auth/me              | Yes  | Get current user profile           |
-| GET    | /api/wallet/balance       | Yes  | Get wallet address + balances      |
-| GET    | /api/wallet/qr            | Yes  | Generate QR code for address       |
-| GET    | /api/wallet/contacts      | Yes  | List saved contacts                |
-| POST   | /api/wallet/contacts      | Yes  | Add a contact                      |
-| DELETE | /api/wallet/contacts/:id  | Yes  | Remove a contact                   |
-| POST   | /api/payments/send        | Yes  | Broadcast payment to Stellar       |
-| GET    | /api/payments/history     | Yes  | Full transaction history           |
-| POST   | /api/wallet/merge         | Yes  | Merge (close) account into another |
-| POST   | /api/support/tickets      | Yes  | Create a support/dispute ticket    |
-| GET    | /api/support/tickets      | Yes  | List user's support tickets        |
-| POST   | /api/admin/clawback       | Admin| Clawback asset for compliance      |
-| GET    | /api/admin/health         | Admin| Full service health diagnostics    |
-| POST   | /api/escrow/create        | Yes  | Create agent escrow (approved agents only) |
-| POST   | /api/escrow/:id/confirm   | Yes  | Agent confirms payout              |
-| POST   | /api/escrow/:id/cancel    | Yes  | Sender cancels escrow              |
-
----
-
-## Agent Registration and Approval
-
-AfriPay uses a registered agent network for fiat distribution. Only **approved** agents may be used as the `agent_wallet` parameter in `POST /api/escrow/create`.
-
-### Agent Lifecycle
-
-```
-1. Agent applies → POST /api/auth/register (creates a user account)
-2. Agent submits their Stellar wallet address for approval
-3. Admin reviews and approves → INSERT INTO agents (wallet_address, status='approved')
-4. Agent is now eligible to receive escrow assignments
-5. Admin may suspend an agent by setting status='suspended'
+```bash
+export SOROBAN_SECRET_KEY='S...'          # testnet secret key, never commit it
+export SOROBAN_RPC_URL='https://soroban-testnet.stellar.org'
+bash contracts/deploy.sh --network testnet
 ```
 
-### agents Table
-
-| Column           | Type        | Description                              |
-|------------------|-------------|------------------------------------------|
-| id               | uuid        | Primary key                              |
-| user_id          | uuid        | FK to users table                        |
-| wallet_address   | text        | Agent's Stellar public key (unique)      |
-| status           | varchar(20) | `pending` / `approved` / `suspended`     |
-| country          | varchar(10) | ISO country code (optional)              |
-| created_at       | timestamptz | Registration timestamp                   |
-| approved_at      | timestamptz | Admin approval timestamp                 |
-
-### Validation
-
-`POST /api/escrow/create` checks the `agents` table before creating any on-chain escrow:
-
-- If `agent_wallet` is not found with `status = 'approved'`, the request is rejected with HTTP 400:
-  ```json
-  { "error": "Agent is not registered in the AfriPay network" }
-  ```
-- Only after a successful agent lookup does the backend proceed to sign and broadcast the Soroban escrow transaction.
+The script builds each crate to optimized WASM, deploys, initializes
+atomically, and writes contract IDs to
+`deployments/testnet_contract_ids.json` and `contracts/.env` (both
+gitignored). Known bugs in the init step are tracked in
+[KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) — test the initialize step manually
+for `dispute-resolution` and `fee-distributor` until they're fixed. After
+deployment, copy the contract IDs into `backend/.env` and restart.
 
 ---
 
-## Environment Variables
+## Security & limitations — read this
 
-```env
-PORT=5000
-NODE_ENV=development
+- **Trust model:** the `savings-circle` contract removes collector risk; it
+  does not remove member credit risk. Collateral + drop-on-default mitigate;
+  they do not eliminate. Do not deploy funds you cannot afford to socialize.
+- **Custodial wallets:** the inherited backend holds user keys
+  (AES-encrypted). This is appropriate for the current product stage but is
+  **not** self-custody; a Freighter/Wallet-Kit migration is on the long-term
+  roadmap.
+- **Contracts are unaudited.** 378 passing unit tests ≠ an audit. Get a
+  Soroban security review before mainnet.
+- **SDK pinned at 20.5.0** with a vendored `ethnum` compatibility patch for
+  modern rustc; upgrading is a coordinated, repo-wide change.
+- **No TTL/rent management** in any contract yet — persistent entries can be
+  archived; this is documented, not handled.
+- **Compliance inherited from AfriPay** (KYC thresholds, AML screening, geo
+  blocking, clawback) applies to the payments side; circle-specific compliance
+  policy is undefined — an open design question for the community.
 
-# PostgreSQL
-DATABASE_URL=postgresql://user:password@localhost:5432/cbpa_db
-
-# JWT
-JWT_SECRET=your_super_secret_jwt_key_here
-JWT_EXPIRES_IN=7d
-
-# Stellar Network
-# Use 'testnet' for development, 'mainnet' for production
-STELLAR_NETWORK=testnet
-STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
-
-# AES-256 encryption key for private key storage (must be exactly 32 characters)
-ENCRYPTION_KEY=your_32_character_encryption_key_
-
-# Cache Configuration
-# Balance cache TTL in seconds (default: 30)
-# Time-To-Live for cached wallet balance data. Lower values ensure fresher data but increase load on Horizon.
-# Higher values reduce load but may show stale balances after recent transactions.
-# Cache is automatically invalidated after send, sendBatch, and sendPath operations.
-BALANCE_CACHE_TTL_SECONDS=30
-
-# CORS
-FRONTEND_URL=http://localhost:3000
-```
-
-> For mainnet: set `STELLAR_NETWORK=mainnet` and `STELLAR_HORIZON_URL=https://horizon.stellar.org`
-
----
-
-## Security
-
-- Passwords hashed with bcrypt (cost factor 12)
-- Stellar private keys encrypted with AES-256-CBC before DB storage — never stored in plaintext
-- JWT authentication required on all protected routes
-- Rate limiting: 100 req/15min globally, 10 req/15min on auth endpoints
-- Fraud protection: blocks wallets exceeding 5 transactions in 10 minutes
-- Input validation on all endpoints via `express-validator`
-- CORS restricted to configured frontend origin
-
----
-
-## Performance & Caching
-
-**Balance Caching with Redis**
-
-Wallet balances are cached in Redis to reduce load on the Stellar Horizon API. The cache behavior is configurable:
-
-- **Configurable TTL**: Set `BALANCE_CACHE_TTL_SECONDS` in your environment (default: 30 seconds)
-- **Automatic Invalidation**: Cache is cleared immediately after:
-  - Standard payments (`POST /api/payments`)
-  - Batch payments (`POST /api/payments/batch`)
-  - Path payments (`POST /api/payments/send-path`)
-- **Fallback Behavior**: If Redis is not configured, balances are fetched live from Horizon on every request
-- **Stale Balance Risk**: In production, ensure the TTL is low enough (15-30 seconds recommended) to prevent users from seeing significantly stale balances after receiving payments
-
-To adjust the cache TTL in production, update the `BALANCE_CACHE_TTL_SECONDS` environment variable without restarting (if using a process manager with hot-reload support).
-
----
-
-## Transaction Status Tracking
-
-| Status    | Description                                      |
-|-----------|--------------------------------------------------|
-| pending   | Remittance created, awaiting agent confirmation  |
-| completed | Payout confirmed, funds released                 |
-| cancelled | Cancelled by sender, full refund issued          |
-
----
-
-## Error Handling
-
-| Scenario                        | HTTP Code | Response                          |
-|---------------------------------|-----------|-----------------------------------|
-| Invalid credentials             | 401       | Invalid email or password         |
-| Expired/missing JWT             | 401       | Invalid or expired token          |
-| Duplicate email                 | 409       | Email already registered          |
-| Invalid amount                  | 400       | Amount must be greater than 0     |
-| Transaction velocity exceeded   | 429       | Transaction limit reached         |
-| Stellar broadcast failure       | 400       | Transaction failed + extras       |
-
----
-
-## Testing on Testnet
-
-1. Register an account — a Stellar testnet wallet is auto-funded via Friendbot
-2. Copy your wallet address from the Dashboard
-3. Use [Stellar Laboratory](https://laboratory.stellar.org) to send test XLM to your address
-4. Send a payment to another testnet address
-5. View the transaction on [Stellar Expert (Testnet)](https://stellar.expert/explorer/testnet)
-
----
-
-## Roadmap
-
-- [x] Soroban smart contract escrow (Rust/WASM on Stellar) — [contracts/escrow/](https://github.com/kay-ai/Cross-Border-Payment-App-for-Africa/tree/main/contracts/escrow)
-  - Trustless three-party escrow model
-  - Automated fee calculation and collection
-  - Full event logging for transparency
-  - Comprehensive test coverage
-- [ ] Multi-currency USDC support with on-chain fee deduction
-- [ ] Agent registration and payout confirmation system
-- [ ] Batch remittance processing
-- [ ] Agent reputation system
-- [ ] Dispute resolution mechanism
-- [ ] Time-locked escrow options (auto-refund after 30 days)
-- [ ] Push notifications for transaction events
-- [ ] Integration with fiat on/off ramps (M-Pesa, Flutterwave, Paystack)
-- [ ] Mobile app (React Native)
+See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) for the full open-bug list
+and [`docs/security/`](docs/security/) for historical fix reports.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Please ensure:
+**We want contributors.** The product is deliberately being built in phases —
+[`docs/ROADMAP.md`](docs/ROADMAP.md) lists exactly what's open, including
+good-first-issues (implement the two broken contract crates, write the empty
+e2e auth spec, fix `deploy.sh`, build the circle API/UI).
 
-- Code follows existing patterns and style
-- New features include appropriate error handling
-- Environment variables are documented in `.env.example`
-- No secrets or private keys are committed
+Norms: preserve Git history; ordinary reviewable commits; every contract change
+ships with tests; match existing crate style; run the relevant test suites
+before pushing; no secrets, ever.
 
----
+The inherited bug backlog is preserved in
+[`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) — numbered issues welcome as
+PRs.
 
 ## Resources
 
 - [Stellar Developer Docs](https://developers.stellar.org)
-- [Stellar SDK (JavaScript)](https://stellar.github.io/js-stellar-sdk/)
-- [Horizon API Reference](https://developers.stellar.org/api/horizon)
-- [Stellar Expert Explorer](https://stellar.expert)
+- [Soroban Docs](https://soroban.stellar.org)
+- [Soroban by Example](https://soroban-by-example.org)
+- [Stellar Expert](https://stellar.expert)
 - [Stellar Discord](https://discord.gg/stellar)
-- [Soroban Smart Contracts](https://soroban.stellar.org)
 
-## Docs
+## Project history
 
-- [Horizon Self-Hosting Guide](docs/horizon-self-hosting.md) — run your own Horizon node in production
-- [Wallet Backup & Recovery](docs/wallet-backup-recovery.md)
-
----
+This repository preserves the complete Git history of the AfriPay project
+(1,100+ commits, all contributors attributed). See [`CHANGELOG.md`](CHANGELOG.md)
+for the transformation log and [`CHANGES.md`](CHANGES.md) plus
+`docs/reports/` for the inherited engineering reports.
 
 ## License
 
 MIT
-
-## Handsoff notes
-
-<!-- handsoff-issue-1123 -->
-- #1123: [SC-118] escrow: `expire_escrow` refunds the sender even after the agent has called `confirm_delivery`, and leaves `updated_at` stale
-
-<!-- handsoff-issue-1124 -->
-- #1124: [SC-119] escrow: `deposit` bypasses `MAX_ESCROW_AMOUNT`, is allowed after delivery confirmation, and accepts deposits from any address
-
-<!-- handsoff-issue-1125 -->
-- #1125: [SC-120] No contract supports admin key rotation (except agent-escrow's unauthenticated one) — a lost or compromised admin key is permanent
-<!-- handsoff-issue-1141 -->
-- #1141: [SC-136] multisig-approval: `execute()` only marks proposals `Expired`, and approved proposals never move funds
-
-<!-- handsoff-issue-1142 -->
-- #1142: [SC-137] multisig-approval: the admin can instantly change signer weights to override quorum, and quorum mixes "count" and "weight" units
-
-<!-- handsoff-issue-1143 -->
-- #1143: [SC-138] multisig-approval: `reject_quorum_change` can underflow after a signer is removed, and removed signers' votes and weights persist
-
-<!-- handsoff-issue-1144 -->
-- #1144: [SC-139] recurring-payments: each schedule stores an `asset`, but `execute_payment` always pays in the contract-wide token
-<!-- handsoff-issue-1112 -->
-- #1112: [SC-107] escrow: `batch_create_escrow` is still missing its closing brace — SC-002 (#1034) was closed but the file still does not compile
-
-<!-- handsoff-issue-1113 -->
-- #1113: [SC-108] escrow: `batch_create_escrow` skips the sender/agent KYC checks that `create_escrow` enforces
-<!-- handsoff-issue-1131 -->
-- #1131: [SC-126] dispute-resolution: `resolve_dispute` ignores the resolution deadline and emits no event
-
-<!-- handsoff-issue-1132 -->
-- #1132: [SC-127] agent-escrow: the sender chooses `fee_bps` (including 0), so the platform fee can be bypassed on every escrow
-
-<!-- handsoff-issue-1135 -->
-- #1135: [SC-130] fee-distributor: `update_fee_rate` stores a value nothing can read, and there are no getters for the fee rate or split
-<!-- handsoff-issue-1129 -->
-- #1129: [SC-124] dispute-resolution: disputes in `UnderAppeal` have no deadline — if the super-arbitrator never acts, funds are locked forever
-
-<!-- handsoff-issue-1133 -->
-- #1133: [SC-128] agent-escrow: `insurance_payout` can be called repeatedly for the same cancelled escrow and pays senders who were already refunded
-<!-- handsoff-issue-1127 -->
-- #1127: [SC-122] dispute-resolution: `settle_filing_fee` pays out the *current* filing fee, not the fee actually paid when the dispute was opened
-
-<!-- handsoff-issue-1128 -->
-- #1128: [SC-123] dispute-resolution: `claim_expired` never refunds or settles the filing fee, stranding it in the contract
-
-<!-- handsoff-issue-1130 -->
-- #1130: [SC-125] dispute-resolution: panel quorum is computed against the *current* panel size, so adding/removing arbitrators mid-dispute changes outcomes
-
-<!-- handsoff-issue-1198 -->
-- #1198: [FE-110] Batch payments poll `/payments/batch/:id/status` and call `/payments/batch/:id/retry`, neither of which exist — polling runs forever
-<!-- handsoff-issue-1203 -->
-- #1203: [FE-115] Contract-address (C…) simulation in Send Money calls `/payments/build` and `/contracts/simulate`, which don't exist — and the branch is unreachable
-
-<!-- handsoff-issue-1204 -->
-- #1204: [FE-116] Online payments are sent without an `Idempotency-Key`, so retrying after a timeout can send money twice
-
-<!-- handsoff-issue-1205 -->
-- #1205: [FE-117] Federation addresses (`name*domain`) are resolved only after PIN confirmation — the user never sees the G-address they're paying
-<!-- handsoff-issue-1192 -->
-- #1192: [FE-104] "Back up secret key" in Profile always fails: it sends only the password, but the backend requires a PIN or TOTP
-
-<!-- handsoff-issue-1193 -->
-- #1193: [FE-105] 2FA setup shows backup codes that don't work; the real codes returned by `/2fa/verify` are discarded
-<!-- handsoff-issue-1202 -->
-- #1202: [FE-114] Send Money's trustline pre-check calls a non-existent endpoint and silently hides the "no trustline" warning
-<!-- handsoff-issue-1140 -->
-- #1140: [SC-135] loyalty-token: `redeem` burns points but records no entitlement or event, so the backend cannot verify a discount was paid for
-
-<!-- handsoff-issue-1178 -->
-- #1178: [BE-132] `POST /api/auth/2fa/disable` only requires the password — no TOTP confirmation and no notification

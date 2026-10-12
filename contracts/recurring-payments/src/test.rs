@@ -2,9 +2,9 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, LedgerInfo},
+    testutils::{Address as _, Events as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, TryFromVal,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -321,6 +321,10 @@ fn test_resume_allows_execution() {
     client.pause_recurring_payment(&sender, &id);
     advance_time(&env, 86400);
     client.resume_recurring_payment(&sender, &id);
+    // Resume refreshes next_payment_at to now + interval (asserted by
+    // test_resume_sets_status_active_and_updates_next_payment_at), so the next
+    // window must elapse before execution is due.
+    advance_time(&env, 86400);
     client.execute_payment(&executor, &id);
     assert_eq!(token_balance(&env, &token_id, &recipient), amount);
 }
@@ -521,10 +525,12 @@ fn test_execute_within_grace_period_succeeds() {
     assert_eq!(client.get_recurring_payment(&id).consecutive_misses, 0);
 }
 
-/// Acceptance criterion 2: execution after grace period panics with the
-/// correct message.
+/// Acceptance criterion 2: execution after grace period. Under committing
+/// state semantics (see #1108) the call records the miss and advances the
+/// schedule instead of panicking — a panicking call would roll back the
+/// recorded miss and leave the schedule stuck (misses could never
+/// accumulate, auto-cancel could never trigger).
 #[test]
-#[should_panic(expected = "Execution window and grace period have both passed")]
 fn test_execute_after_grace_period_panics() {
     let (env, contract_id, token_id, sender, recipient, executor, _) = setup();
     let client = RecurringPaymentsContractClient::new(&env, &contract_id);
@@ -537,8 +543,10 @@ fn test_execute_after_grace_period_panics() {
     // Advance past next_payment_at AND the full grace window
     advance_time(&env, 86400 + grace + 1);
 
-    // Must panic because both the execution window and grace period have passed
+    // Miss path: both the execution window and grace period have passed.
     client.execute_payment(&executor, &id);
+    assert_eq!(client.get_missed_executions(&id), 1);
+    assert_eq!(client.get_recurring_payment(&id).status, ScheduleStatus::Active);
 }
 
 /// Acceptance criterion 3: schedule is auto-cancelled after 3 consecutive
@@ -555,37 +563,26 @@ fn test_auto_cancel_after_three_consecutive_misses() {
         &sender, &recipient, &token_id, &amount, &interval, &0, &grace, &max_missed,
     );
 
-    // Miss 1: advance past first window + grace, call execute_payment to trigger miss recording
-    // Each call panics but also records the miss and advances next_payment_at.
-    // We use std::panic::catch_unwind equivalent — in Soroban test env we rely on
-    // the fact that the schedule IS mutated before the panic; so we call the
-    // panicking functions and just verify state afterwards.
+    // Miss 1: advance past first window + grace, call execute_payment to trigger miss recording.
+    // The miss call commits its state (schedule advanced, counter incremented)
+    // and returns early; a panicking call would roll the miss back.
 
     // Miss 1
     advance_time(&env, interval + grace + 1);
-    let result1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.execute_payment(&executor, &id);
-    }));
-    assert!(result1.is_err(), "expected panic for miss 1");
+    client.execute_payment(&executor, &id);
     assert_eq!(client.get_missed_executions(&id), 1);
     assert_eq!(client.get_recurring_payment(&id).status, ScheduleStatus::Active);
 
     // Miss 2: the schedule's next_payment_at was advanced by the miss handler;
     // advance past that new window + grace period again.
     advance_time(&env, interval + grace + 1);
-    let result2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.execute_payment(&executor, &id);
-    }));
-    assert!(result2.is_err(), "expected panic for miss 2");
+    client.execute_payment(&executor, &id);
     assert_eq!(client.get_missed_executions(&id), 2);
     assert_eq!(client.get_recurring_payment(&id).status, ScheduleStatus::Active);
 
     // Miss 3: triggers auto-cancel
     advance_time(&env, interval + grace + 1);
-    let result3 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.execute_payment(&executor, &id);
-    }));
-    assert!(result3.is_err(), "expected panic for miss 3");
+    client.execute_payment(&executor, &id);
     assert_eq!(client.get_missed_executions(&id), 3);
     // After 3 consecutive misses the schedule must be Cancelled
     assert_eq!(
@@ -637,6 +634,8 @@ fn test_get_active_schedules_filter() {
 fn test_per_sender_limit_enforcement() {
     let (env, contract_id, token_id, sender, recipient, _, _) = setup();
     let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    // 501 contract calls exceed the default host CPU budget in one Env.
+    env.budget().reset_unlimited();
     // Create 500 schedules to hit the limit
     for _ in 0..500 {
         client.create_recurring_payment(&sender, &recipient, &token_id, &100_0000000, &86400, &0, &3600, &3);
@@ -772,6 +771,7 @@ fn test_compromised_executor_rapid_calls_cannot_drain_funds() {
     client.execute_payment(&executor, &id);
     assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount * 2);
     assert_eq!(token_balance(&env, &token_id, &sender), initial_balance - payment_amount * 2);
+}
 // ── SC-029: Pre-authorization semantics, replay/expiry tests ─────────────────
 
 #[test]

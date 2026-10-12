@@ -54,7 +54,7 @@ jobs:
     
     - name: Build Frontend
       run: |
-        cd frontend
+        cd webapp
         npm ci
         npm run build
     

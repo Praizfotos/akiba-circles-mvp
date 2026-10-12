@@ -15,7 +15,7 @@ jobs:
       matrix:
         node-version: [18.x, 20.x]
         # Run backend/frontend separately for coverage
-        component: [backend, frontend]
+        component: [backend, webapp]
       fail-fast: false
       
     services:
@@ -48,7 +48,7 @@ jobs:
       with:
         path: |
           backend/node_modules
-          frontend/node_modules
+          webapp/node_modules
         key: ${{ runner.os }}-${{ matrix.node-version }}-${{ hashFiles('**/package-lock.json') }}
     
     - name: Install backend deps
@@ -96,14 +96,14 @@ jobs:
     - name: Install frontend deps
       if: matrix.component == 'frontend'
       run: |
-        cd frontend
+        cd webapp
         npm ci
 
     - name: Lint correctness (frontend, required)
       if: matrix.component == 'frontend'
       run: |
-        cd frontend
-        npm run lint:build
+        cd webapp
+        npm run build
 
     - name: Lint style (frontend)
       if: matrix.component == 'frontend'
@@ -111,7 +111,7 @@ jobs:
       # this makes new violations visible without blocking merges until that's paid down
       continue-on-error: true
       run: |
-        cd frontend
+        cd webapp
         npm run lint
 
     - name: Audit dependencies (frontend)
@@ -120,7 +120,7 @@ jobs:
       # (e.g. ws, websocket-driver via react-scripts/webpack-dev-server); informational for now
       continue-on-error: true
       run: |
-        cd frontend
+        cd webapp
         npm audit --audit-level=high
 
     - name: Run backend tests
@@ -136,14 +136,14 @@ jobs:
     - name: Run frontend tests
       if: matrix.component == 'frontend'
       run: |
-        cd frontend
-        npm test -- --coverage --watchAll=false --coverageReporters=lcov --coverageDirectory=../coverage/frontend
+        cd webapp
+        npm test -- --coverage --watchAll=false --coverageReporters=lcov --coverageDirectory=../coverage/webapp
     
     - name: Coverage report
       if: always()
       uses: codecov/codecov-action@v5
       with:
-        files: ./coverage/backend/lcov.info,./coverage/frontend/lcov.info
+        files: ./coverage/backend/lcov.info,./coverage/webapp/lcov.info
         fail_ci_if_error: true
     
     - name: Upload coverage
@@ -268,7 +268,7 @@ jobs:
     
     - name: Install frontend dependencies
       run: |
-        cd frontend
+        cd webapp
         npm ci
     
     - name: Install E2E dependencies
@@ -286,7 +286,7 @@ jobs:
     
     - name: Build frontend for E2E
       run: |
-        cd frontend
+        cd webapp
         npm run build
       env:
         # FE-130: must include /api so axios baseURL matches the backend routing

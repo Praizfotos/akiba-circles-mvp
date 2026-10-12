@@ -25,12 +25,7 @@ jobs:
         npm run build  # if build script exists
     
     # Railway example (replace with your platform)
-    - name: Deploy to Railway
-      uses: railwayapp/action@v1
-      with:
-        railwayToken: ${{ secrets.RAILWAY_TOKEN }}
-        serviceId: ${{ secrets.RAILWAY_BACKEND_SERVICE_ID }}
-        source: backend/
+    # Deploy step removed — use your platform's CLI or CI integration instead.
     
     # Render example alternative
     # - name: Deploy to Render
@@ -58,13 +53,7 @@ jobs:
         npm ci
         npm run build
     
-    # Railway example
-    - name: Deploy to Railway  
-      uses: railwayapp/action@v1
-      with:
-        railwayToken: ${{ secrets.RAILWAY_TOKEN }}
-        serviceId: ${{ secrets.RAILWAY_FRONTEND_SERVICE_ID }}
-        source: frontend/
+    # Railway example — deployment step removed (action unavailable).
     
     # Vercel example alternative
     # - name: Deploy to Vercel

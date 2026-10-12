@@ -143,7 +143,7 @@ jobs:
       if: always()
       uses: codecov/codecov-action@v5
       with:
-        files: ./coverage/backend/lcov.info,./coverage/webapp/lcov.info
+        files: ./coverage/backend/lcov.info
         fail_ci_if_error: true
     
     - name: Upload coverage

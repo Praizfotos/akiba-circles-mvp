@@ -10,6 +10,40 @@ Breaking changes are marked **[BREAKING]**.
 
 ## [Unreleased]
 
+### Fixed — `escrow` expire_escrow respects delivery confirmation (SC-118, issue #1123)
+
+- `contracts/escrow/src/lib.rs` — `expire_escrow` now:
+  - rejects escrows whose delivery has been confirmed (previously anyone
+    could refund the sender after `confirm_delivery` once expiry passed,
+    robbing the agent of the release they were owed; sender recourse for
+    agent non-payment is `dispute_escrow`);
+  - updates `updated_at` to the expiry timestamp before the refund transfer
+    (previously left stale, so `cleanup_escrow`'s retention window started
+    from the wrong moment), matching `cancel_escrow`'s
+    checks-effects-interactions ordering.
+- 2 regression tests added (`test_expire_escrow_after_confirm_delivery_is_rejected`,
+  `test_expire_escrow_updates_updated_at`); both fail against the previous
+  implementation. 74/74 green.
+
+### Fixed — `escrow` deposit hardened (SC-119, issue #1124)
+
+- `contracts/escrow/src/lib.rs` — `deposit` now:
+  - rejects any deposit that would push the escrow total past
+    `MAX_ESCROW_AMOUNT` (previously only enforced at `create_escrow`, so a
+    pending escrow could be inflated without bound);
+  - only accepts deposits from the original escrow sender (previously any
+    address could top up any pending escrow, also bypassing the KYC check
+    performed on the sender at creation);
+  - rejects deposits after `confirm_delivery` (status stays `Pending` so
+    release can proceed, but the deal is closed — further top-ups would
+    inflate the agent's release with no sender recourse since `cancel_escrow`
+    is already blocked).
+- 4 regression tests added (`test_deposit_beyond_max_escrow_amount_is_rejected`,
+  `test_deposit_at_exact_max_escrow_amount_is_allowed`,
+  `test_deposit_from_non_sender_is_rejected`,
+  `test_deposit_after_confirm_delivery_is_rejected`); the three rejection
+  tests fail against the previous implementation. 72/72 green.
+
 ### Fixed — `multisig-approval` quorum voting unified on weight units (SC-137/SC-138, issues #1142/#1143)
 
 - `contracts/multisig-approval/src/lib.rs`:

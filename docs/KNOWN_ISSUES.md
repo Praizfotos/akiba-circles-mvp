@@ -83,16 +83,16 @@ Numbered issues from the original project. Contract numbers in brackets map to
 `contracts/`.
 
 <!-- handsoff-issue-1123 -->
-- #1123: [SC-118] escrow: `expire_escrow` refunds the sender even after the agent has called `confirm_delivery`, and leaves `updated_at` stale
+- #1123: [SC-118] escrow: `expire_escrow` refunds the sender even after the agent has called `confirm_delivery`, and leaves `updated_at` stale — **fixed**: `expire_escrow` now rejects escrows with `payout_confirmed` set (mirroring `cancel_escrow`; sender recourse for agent non-payment after confirmation is `dispute_escrow`) and updates `updated_at` before the refund transfer, matching `cancel_escrow`'s checks-effects-interactions ordering. Regression tests in `contracts/escrow/src/test.rs` (`test_expire_escrow_after_confirm_delivery_is_rejected`, `test_expire_escrow_updates_updated_at`).
 
 <!-- handsoff-issue-1124 -->
-- #1124: [SC-119] escrow: `deposit` bypasses `MAX_ESCROW_AMOUNT`, is allowed after delivery confirmation, and accepts deposits from any address
+- #1124: [SC-119] escrow: `deposit` bypasses `MAX_ESCROW_AMOUNT`, is allowed after delivery confirmation, and accepts deposits from any address — **fixed**: `deposit` now rejects deposits that would push the total past `MAX_ESCROW_AMOUNT`, restricts depositors to the original escrow sender (also restoring the KYC invariant established at `create_escrow`), and rejects deposits once `confirm_delivery` has run. Regression tests in `contracts/escrow/src/test.rs` (`test_deposit_beyond_max_escrow_amount_is_rejected`, `test_deposit_at_exact_max_escrow_amount_is_allowed`, `test_deposit_from_non_sender_is_rejected`, `test_deposit_after_confirm_delivery_is_rejected`).
 
 <!-- handsoff-issue-1125 -->
 - #1125: [SC-120] No contract supports admin key rotation (except agent-escrow's unauthenticated one) — a lost or compromised admin key is permanent
 
 <!-- handsoff-issue-1141 -->
-- #1141: [SC-136] multisig-approval: `execute()` only marks proposals `Expired`, and approved proposals never move funds
+- #1141: [SC-136] multisig-approval: `execute()` only marks proposals `Expired`, and approved proposals never move funds — **not a fund-movement defect; design clarification**: `multisig-approval` is an approval registry by design — it holds no token address and performs no token transfers (the `amount`/`recipient` fields exist only for off-chain signature binding via `proposal_hash`). Reaching quorum flips the proposal to `Executed` as an authorization signal for external systems (escrow, recurring-payments, backend); `execute(tx_id)` is a misnomer for "finalize an expired pending proposal" (Pending → Expired cleanup) and is unrelated to the `Executed` status. No code change warranted without a product decision to add fund custody to this contract.
 
 <!-- handsoff-issue-1142 -->
 - #1142: [SC-137] multisig-approval: the admin can instantly change signer weights to override quorum, and quorum mixes "count" and "weight" units — **partially fixed**: all voting paths (`reject`, quorum-change approve/reject, signer-removal floor) now use weight units consistently, weight changes emit a `SignerWeightChanged` event, and `get_signer_weight` was added. Remaining: weight changes are still instantaneous admin actions (a deliberate design choice codified by the #1055/#1056 tests, since the contract holds no funds) — routing them through the 72h rotation time-lock is an open design decision.

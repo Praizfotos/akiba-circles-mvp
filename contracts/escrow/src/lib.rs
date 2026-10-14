@@ -417,6 +417,15 @@ impl EscrowContract {
         next_id
     }
 
+    /// Add funds to a pending escrow. Only the original escrow sender may
+    /// top up their own escrow, and only while delivery is unconfirmed.
+    ///
+    /// SC-119 (#1124): the new total is capped at `MAX_ESCROW_AMOUNT` (the
+    /// same invariant enforced at creation), only `escrow.sender` may
+    /// deposit, and deposits are rejected once `confirm_delivery` has run —
+    /// at that point the deal is closed and `cancel_escrow` is already
+    /// blocked, so further top-ups would only inflate the agent's release
+    /// with no sender recourse.
     pub fn deposit(env: Env, sender: Address, escrow_id: u64, amount: i128) {
         if amount <= 0 {
             panic!("Amount must be positive");
@@ -438,6 +447,29 @@ impl EscrowContract {
             panic!("Escrow has expired");
         }
 
+        // SC-119: once delivery is confirmed the escrow is closed to further
+        // funding (status stays Pending so release can still proceed).
+        if escrow.payout_confirmed {
+            panic!("Delivery has already been confirmed");
+        }
+
+        // SC-119: only the original sender may top up their own escrow. This
+        // also preserves the KYC invariant — `create_escrow` verifies the
+        // sender, but arbitrary third-party depositors were never checked.
+        if sender != escrow.sender {
+            panic!("Only the sender can deposit");
+        }
+
+        // SC-119: keep the MAX_ESCROW_AMOUNT invariant that create_escrow
+        // establishes — deposit previously let the total grow without bound.
+        let new_total = escrow
+            .amount
+            .checked_add(amount)
+            .expect("escrow amount overflow");
+        if new_total > MAX_ESCROW_AMOUNT {
+            panic!("Amount exceeds maximum escrow amount");
+        }
+
         let usdc_address: Address = env
             .storage()
             .persistent()
@@ -450,7 +482,7 @@ impl EscrowContract {
             &amount,
         );
 
-        escrow.amount += amount;
+        escrow.amount = new_total;
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -839,6 +871,12 @@ impl EscrowContract {
 
     /// Permissionless auto-refund triggered by anyone once the escrow expiry timestamp
     /// has passed. Refunds the full remaining balance to the original sender.
+    ///
+    /// SC-118 (#1123): blocked once the agent has confirmed delivery — expiry
+    /// protects the sender from *undelivered* goods; after confirmation the
+    /// agent is owed the release, and the sender's recourse for agent
+    /// non-payment is `dispute_escrow`, not expiry. Also updates `updated_at`
+    /// so `cleanup_escrow`'s retention window starts from the actual cancel.
     pub fn expire_escrow(env: Env, caller: Address, escrow_id: u64) {
         caller.require_auth();
 
@@ -852,6 +890,12 @@ impl EscrowContract {
             panic!("Escrow is not in pending state");
         }
 
+        // SC-118: mirror cancel_escrow — once delivery is confirmed the agent
+        // must be paid via release; expiry must not refund the sender.
+        if escrow.payout_confirmed {
+            panic!("Cannot expire: agent has confirmed delivery");
+        }
+
         let now = env.ledger().timestamp();
         if now <= escrow.expires_at {
             panic!("Escrow has not expired yet");
@@ -863,16 +907,19 @@ impl EscrowContract {
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
+        // Checks-Effects-Interactions: update state BEFORE the external token
+        // call (matches cancel_escrow).
+        escrow.status = EscrowStatus::Cancelled;
+        escrow.updated_at = now;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+
         token::Client::new(&env, &usdc_address).transfer(
             &env.current_contract_address(),
             &escrow.sender,
             &escrow.amount,
         );
-
-        escrow.status = EscrowStatus::Cancelled;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
 
         env.events().publish(
             (Symbol::new(&env, "EscrowExpired"),),

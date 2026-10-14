@@ -923,6 +923,56 @@ fn test_expire_escrow_on_cancelled_escrow_panics() {
     client.expire_escrow(&anyone, &escrow_id);
 }
 
+// ── SC-118 / #1123: expire_escrow must respect confirm_delivery ───────────────
+
+#[test]
+#[should_panic(expected = "Cannot expire: agent has confirmed delivery")]
+fn test_expire_escrow_after_confirm_delivery_is_rejected() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    client.confirm_delivery(&agent, &escrow_id);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += 30 * 24 * 60 * 60 + 1;
+    });
+
+    // Delivery is confirmed — the agent is owed. Expiry must not refund the
+    // sender and rob the agent of the release.
+    let anyone = Address::generate(&env);
+    client.expire_escrow(&anyone, &escrow_id);
+}
+
+#[test]
+fn test_expire_escrow_updates_updated_at() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+
+    let expire_at = 30 * 24 * 60 * 60 + 1;
+    env.ledger().with_mut(|li| {
+        li.timestamp += expire_at;
+    });
+
+    let anyone = Address::generate(&env);
+    client.expire_escrow(&anyone, &escrow_id);
+
+    // updated_at must reflect the expiry moment so cleanup_escrow's retention
+    // window starts from the actual cancel, not a stale creation timestamp.
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.updated_at, expire_at);
+}
+
 #[test]
 #[should_panic(expected = "Insufficient accumulated fees")]
 fn test_withdraw_fees_exceeds_accumulated_panics() {
@@ -992,6 +1042,82 @@ fn test_deposit_emits_escrow_deposited_event() {
     assert_eq!(payload.depositor, sender);
     assert_eq!(payload.amount, deposit_amount);
     assert_eq!(payload.new_total, amount + deposit_amount);
+}
+
+// ── SC-119 / #1124: deposit must respect MAX_ESCROW_AMOUNT ────────────────────
+
+#[test]
+#[should_panic(expected = "Amount exceeds maximum escrow amount")]
+fn test_deposit_beyond_max_escrow_amount_is_rejected() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let max = 10_000_000_000_000i128; // MAX_ESCROW_AMOUNT
+    let initial = max - 50;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, initial + 51);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &initial, &250);
+    // Pushes the total one stroop past MAX_ESCROW_AMOUNT — must panic.
+    client.deposit(&sender, &escrow_id, &51);
+}
+
+#[test]
+fn test_deposit_at_exact_max_escrow_amount_is_allowed() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let max = 10_000_000_000_000i128;
+    let initial = max - 50;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, max);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &initial, &250);
+    client.deposit(&sender, &escrow_id, &50);
+
+    assert_eq!(client.get_escrow(&escrow_id).amount, max);
+}
+
+// ── SC-119 / #1124: only the escrow sender may deposit ────────────────────────
+
+#[test]
+#[should_panic(expected = "Only the sender can deposit")]
+fn test_deposit_from_non_sender_is_rejected() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let amount = 500_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+    mint_usdc(&env, &usdc_id, &admin, &stranger, amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    // A third party must not be able to top up someone else's escrow.
+    client.deposit(&stranger, &escrow_id, &amount);
+}
+
+// ── SC-119 / #1124: no deposits after delivery confirmation ───────────────────
+
+#[test]
+#[should_panic(expected = "Delivery has already been confirmed")]
+fn test_deposit_after_confirm_delivery_is_rejected() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 500_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount * 2);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    client.confirm_delivery(&agent, &escrow_id);
+    // Status stays Pending after confirmation, but the deal is closed —
+    // further deposits must be rejected.
+    client.deposit(&sender, &escrow_id, &amount);
 }
 
 // ── escrow → dispute-resolution cross-contract hook ───────────────────────────

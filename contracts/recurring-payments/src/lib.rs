@@ -189,6 +189,10 @@ impl RecurringPaymentsContract {
     /// The sender must maintain sufficient token balance and allowance.
     ///
     /// # Arguments
+    /// * `asset`                 — SEP-41 token contract used for every execution
+    ///                             of this schedule (payment and fee). The sender
+    ///                             must approve this contract as a spender on
+    ///                             that token.
     /// * `grace_period_secs`     — Seconds after `next_payment_at` during which a
     ///                             late execution is still accepted (default 3 600).
     /// * `max_missed_executions` — Consecutive misses before auto-cancel (default 3,
@@ -345,6 +349,9 @@ impl RecurringPaymentsContract {
     /// Execute a due payment for `schedule_id`.
     /// Anyone may call this (permissionless / incentivized execution).
     ///
+    /// The payment and any fee are pulled in the schedule's `asset` token,
+    /// not the contract-wide `initialize` token (issue #1144 / SC-139).
+    ///
     /// Timing rules and missed-execution accounting:
     /// - `now < next_payment_at` → panics "payment not yet due"
     /// - `now` in `[next_payment_at, next_payment_at + grace_period_secs]` →
@@ -428,11 +435,11 @@ impl RecurringPaymentsContract {
             panic!("maximum executions reached");
         }
 
-        let token_address: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TokenAddress)
-            .expect("not initialized");
+        // Pay in the asset the schedule was created with (issue #1144 / SC-139).
+        // The contract-wide `TokenAddress` remains the default only for the
+        // deprecated `authorize_recurring` alias, which fills `asset` at
+        // creation time.
+        let token_address: Address = schedule.asset.clone();
 
         let fee_bps: u32 = env
             .storage()

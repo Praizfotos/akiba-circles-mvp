@@ -494,6 +494,154 @@ fn test_fee_accumulates_over_multiple_executions() {
     }
 }
 
+// ── SC-139 (#1144): execute_payment must use the schedule's asset ────────────
+
+/// Two-token environment: the contract is initialized with `token_a` (the
+/// contract-wide default), while schedules may name `token_b` as their asset.
+/// Returns `(env, contract_id, token_a, token_b, sender, recipient, executor, admin)`.
+fn setup_two_tokens(fee_bps: u32) -> (
+    Env,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let token_a = env.register_stellar_asset_contract(token_admin.clone());
+    let token_b = env.register_stellar_asset_contract(token_admin);
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register_contract(None, RecurringPaymentsContract);
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &token_a, &fee_bps);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let executor = Address::generate(&env);
+
+    // Fund the sender with both assets; each test approves only what it needs.
+    StellarAssetClient::new(&env, &token_a).mint(&sender, &10_000_0000000);
+    StellarAssetClient::new(&env, &token_b).mint(&sender, &10_000_0000000);
+
+    (env, contract_id, token_a, token_b, sender, recipient, executor, admin)
+}
+
+/// Regression: a schedule created with `asset = token_b` must pay the recipient
+/// in token_b, and must not touch the contract-wide token_a at all.
+/// Pre-fix this failed: the recipient's token_b balance stayed 0 while
+/// token_a was pulled instead.
+#[test]
+fn test_execute_payment_pays_in_schedule_asset() {
+    let (env, contract_id, token_a, token_b, sender, recipient, executor, _admin) =
+        setup_two_tokens(0);
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    TokenClient::new(&env, &token_b).approve(
+        &sender,
+        &contract_id,
+        &i128::MAX,
+        &(env.ledger().sequence() + 10_000),
+    );
+
+    let amount = 1_000_0000000i128;
+    let id = client.create_recurring_payment(
+        &sender, &recipient, &token_b, &amount, &86400, &0, &3600, &3,
+    );
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+
+    assert_eq!(token_balance(&env, &token_b, &recipient), amount);
+    // The contract-wide token must not move on this path.
+    assert_eq!(token_balance(&env, &token_a, &recipient), 0);
+    assert_eq!(token_balance(&env, &token_a, &contract_id), 0);
+}
+
+/// The platform fee is also pulled in the schedule's asset (token_b),
+/// forwarded to the admin in that same asset.
+#[test]
+fn test_execute_payment_fee_taken_in_schedule_asset() {
+    let (env, contract_id, token_a, token_b, sender, recipient, executor, admin) =
+        setup_two_tokens(500); // 5 %
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    TokenClient::new(&env, &token_b).approve(
+        &sender,
+        &contract_id,
+        &i128::MAX,
+        &(env.ledger().sequence() + 10_000),
+    );
+
+    let amount = 1_000_0000000i128;
+    let id = client.create_recurring_payment(
+        &sender, &recipient, &token_b, &amount, &86400, &0, &3600, &3,
+    );
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+
+    let expected_fee = amount * 500 / 10_000;
+    assert_eq!(token_balance(&env, &token_b, &recipient), amount - expected_fee);
+    assert_eq!(token_balance(&env, &token_b, &admin), expected_fee);
+    // No fee, no payment in the contract-wide token.
+    assert_eq!(token_balance(&env, &token_a, &admin), 0);
+    assert_eq!(token_balance(&env, &token_a, &recipient), 0);
+}
+
+/// Regression: a sender who only ever authorized the schedule's asset must be
+/// able to execute. Pre-fix this panicked with "insufficient allowance" because
+/// the contract pulled from the contract-wide token instead.
+#[test]
+fn test_execute_payment_with_only_schedule_asset_allowance_succeeds() {
+    let (env, contract_id, _token_a, token_b, sender, recipient, executor, _admin) =
+        setup_two_tokens(0);
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    // Approve ONLY token_b — the schedule's asset.
+    TokenClient::new(&env, &token_b).approve(
+        &sender,
+        &contract_id,
+        &i128::MAX,
+        &(env.ledger().sequence() + 10_000),
+    );
+
+    let amount = 2_000_0000000i128;
+    let id = client.create_recurring_payment(
+        &sender, &recipient, &token_b, &amount, &86400, &0, &3600, &3,
+    );
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+    assert_eq!(token_balance(&env, &token_b, &recipient), amount);
+}
+
+/// Failure path: a schedule whose asset was never authorized must fail cleanly
+/// (no partial state change — the schedule stays Active and due).
+#[test]
+#[should_panic]
+fn test_execute_payment_missing_schedule_asset_allowance_panics() {
+    let (env, contract_id, token_a, token_b, sender, recipient, executor, _admin) =
+        setup_two_tokens(0);
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    // Approve only the contract-wide token_a; the schedule names token_b.
+    TokenClient::new(&env, &token_a).approve(
+        &sender,
+        &contract_id,
+        &i128::MAX,
+        &(env.ledger().sequence() + 10_000),
+    );
+
+    let id = client.create_recurring_payment(
+        &sender, &recipient, &token_b, &1_000_0000000, &86400, &0, &3600, &3,
+    );
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+}
+
 // ── Grace period tests ────────────────────────────────────────────────────────
 
 /// Acceptance criterion 1: execution within the grace period succeeds.

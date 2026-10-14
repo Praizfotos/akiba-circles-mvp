@@ -10,6 +10,17 @@ Breaking changes are marked **[BREAKING]**.
 
 ## [Unreleased]
 
+### Fixed — `recurring-payments` pays in the schedule's asset (SC-139, issue #1144)
+
+- `contracts/recurring-payments/src/lib.rs` — `execute_payment` now pulls the
+  payment and the platform fee in the schedule's `asset` token instead of the
+  contract-wide `initialize` token (which remains the default only for the
+  deprecated `authorize_recurring` alias). Previously a schedule created with a
+  non-default asset either paid the wrong token or failed every window with
+  "insufficient allowance" until auto-cancel. Four regression tests added
+  (`test_execute_payment_*`); 55/55 green. (Note: issue #1144 had been marked
+  closed by a README-only commit — the defect was still present in code.)
+
 ### Added — `savings-circle` core contract (Akiba Circles centerpiece)
 
 - `contracts/savings-circle/` — rotating savings (esusu/tontine) contract on

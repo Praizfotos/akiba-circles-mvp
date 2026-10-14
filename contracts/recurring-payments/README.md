@@ -6,13 +6,14 @@ A Soroban smart contract that lets users authorize on-chain recurring transfers 
 
 - The contract stores **authorization only** — no funds are held.
 - Payments are pulled directly from the sender's wallet to the recipient via `transfer_from` (the sender must approve the contract as a spender).
+- Each schedule names its own **asset** (any SEP-41 token contract); `execute_payment` pays the recipient and forwards any platform fee in that asset (issue #1144 / SC-139). The `initialize` token is only the default used by the deprecated `authorize_recurring` alias.
 - Execution is **permissionless**: anyone can call `execute_payment` once a schedule is due, enabling incentivized keeper bots.
 
 ## Functions
 
 | Function | Auth required | Description |
 |---|---|---|
-| `initialize(token_address)` | — | One-time setup, stores the token contract address |
+| `initialize(token_address)` | — | One-time setup; stores the default token used by the deprecated `authorize_recurring` alias |
 | `authorize_recurring(sender, recipient, amount, interval)` | sender | Creates a recurring schedule, returns schedule ID |
 | `execute_payment(executor, schedule_id)` | executor | Executes a due payment; anyone may call this |
 | `cancel_recurring(sender, schedule_id)` | sender | Cancels an active schedule |

@@ -101,7 +101,7 @@ Numbered issues from the original project. Contract numbers in brackets map to
 - #1143: [SC-138] multisig-approval: `reject_quorum_change` can underflow after a signer is removed, and removed signers' votes and weights persist
 
 <!-- handsoff-issue-1144 -->
-- #1144: [SC-139] recurring-payments: each schedule stores an `asset`, but `execute_payment` always pays in the contract-wide token
+- #1144: [SC-139] recurring-payments: each schedule stores an `asset`, but `execute_payment` always pays in the contract-wide token — **fixed**: `execute_payment` now pulls the payment and fee in `schedule.asset`; regression tests in `contracts/recurring-payments/src/test.rs` (`test_execute_payment_*_schedule_asset*`)
 
 <!-- handsoff-issue-1113 -->
 - #1113: [SC-108] escrow: `batch_create_escrow` skips the sender/agent KYC checks that `create_escrow` enforces

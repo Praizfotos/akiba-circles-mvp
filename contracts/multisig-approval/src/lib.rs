@@ -10,8 +10,11 @@ const ROTATION_DELAY: u64 = 259_200; // 72 hours
 
 /// Default weight for a signer that has never had one set explicitly.
 const DEFAULT_SIGNER_WEIGHT: u32 = 1;
-/// Upper bound on any single signer's weight. Caps how much influence one key
-/// can hold so a single signer cannot unilaterally satisfy quorum.
+/// Upper bound on any single signer's weight. Note that quorum is a *weight*
+/// threshold (see `approve`), so a weight >= quorum deliberately lets that
+/// signer execute alone — the weighted-authority design codified by the
+/// #1055/#1056 test suites. The cap only bounds how concentrated a single
+/// key's influence can become.
 const MAX_SIGNER_WEIGHT: u32 = 100;
 
 #[contracttype]
@@ -109,6 +112,18 @@ pub struct EvtSignerChangeCancelled {
     pub cancelled_at: u64,
 }
 
+/// Emitted whenever an admin changes a signer's weight (issue #1142 / SC-137).
+/// Weight changes are instantaneous governance actions — indexers and the
+/// other signers must be able to observe them.
+#[contracttype]
+#[derive(Clone)]
+pub struct EvtSignerWeightChanged {
+    pub signer: Address,
+    pub old_weight: u32,
+    pub new_weight: u32,
+    pub changed_at: u64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -188,7 +203,9 @@ impl MultisigContract {
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
     }
 
-    /// Reject a pending proposal. Marks as rejected when majority of approvers reject.
+    /// Reject a pending proposal. Marks as rejected once the cumulative
+    /// rejection **weight** reaches quorum and the remaining approval weight
+    /// can no longer lift the proposal to quorum.
     pub fn reject(env: Env, approver: Address, tx_id: u64) {
         approver.require_auth();
         Self::assert_is_approver(&env, &approver);
@@ -197,7 +214,11 @@ impl MultisigContract {
         assert!(!env.storage().persistent().has(&DataKey::Voted(tx_id, approver.clone())), "already voted");
 
         env.storage().persistent().set(&DataKey::Voted(tx_id, approver.clone()), &true);
-        proposal.rejections += 1;
+        // Count rejection by weight, exactly as `approve` counts approval
+        // weight (issue #1142 / SC-137). Counting votes instead of weight let
+        // a set of low-weight signers outvote the quorum threshold while a
+        // single high-weight approver could still carry the proposal.
+        proposal.rejections += Self::signer_weight(&env, &approver);
 
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
@@ -254,12 +275,16 @@ impl MultisigContract {
     }
 
     /// Propose a quorum threshold change. Any approver may propose.
-    /// The change takes effect only when the current quorum of approvers approve it.
+    /// The change takes effect only when the current approval weight reaches
+    /// quorum. `new_quorum` is a weight threshold: it must not exceed the
+    /// total weight of the current signers.
     pub fn propose_quorum_change(env: Env, proposer: Address, new_quorum: u32) -> u64 {
         proposer.require_auth();
         Self::assert_is_approver(&env, &proposer);
-        let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
-        assert!(new_quorum > 0 && new_quorum <= approvers.len(), "invalid quorum");
+        // Quorum is a *weight* threshold (see `approve`), so the new value is
+        // validated against the total weight of the current signers, not the
+        // signer count (issue #1142 / SC-137).
+        assert!(new_quorum > 0 && new_quorum <= Self::total_signer_weight(&env), "invalid quorum");
 
         let id: u64 = env.storage().instance().get(&DataKey::QuorumCounter).unwrap();
         let proposal_ttl: u64 = env.storage().instance().get(&DataKey::ProposalTtl).unwrap_or(DEFAULT_PROPOSAL_TTL_SECS);
@@ -286,8 +311,10 @@ impl MultisigContract {
         let mut proposal = Self::get_pending_quorum(&env, id);
         assert!(!env.storage().persistent().has(&DataKey::QuorumVoted(id, approver.clone())), "already voted");
 
-        env.storage().persistent().set(&DataKey::QuorumVoted(id, approver), &true);
-        proposal.approvals += 1;
+        env.storage().persistent().set(&DataKey::QuorumVoted(id, approver.clone()), &true);
+        // Count approval by weight, matching the transaction-proposal path
+        // (issue #1142 / SC-137): quorum is a weight threshold everywhere.
+        proposal.approvals += Self::signer_weight(&env, &approver);
 
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
         if proposal.approvals >= quorum {
@@ -305,13 +332,27 @@ impl MultisigContract {
         let mut proposal = Self::get_pending_quorum(&env, id);
         assert!(!env.storage().persistent().has(&DataKey::QuorumVoted(id, approver.clone())), "already voted");
 
-        env.storage().persistent().set(&DataKey::QuorumVoted(id, approver), &true);
-        proposal.rejections += 1;
+        env.storage().persistent().set(&DataKey::QuorumVoted(id, approver.clone()), &true);
+        // Weight units, matching `approve_quorum_change` (issue #1142 / SC-137).
+        proposal.rejections += Self::signer_weight(&env, &approver);
 
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
-        let remaining = approvers.len() as u32 - proposal.approvals - proposal.rejections;
-        if proposal.approvals + remaining < quorum {
+        // Remaining *weight* of signers who have not voted on this proposal,
+        // computed over the current signer set. This replaces the old
+        // `approvers.len() - approvals - rejections` subtraction, which
+        // underflowed once signer removals shrank the list below the number
+        // of votes cast (issue #1143 / SC-138) and counted since-removed
+        // signers as available headroom.
+        let mut remaining_weight: u32 = 0;
+        for a in approvers.iter() {
+            if !env.storage().persistent().has(&DataKey::QuorumVoted(id, a.clone())) {
+                remaining_weight += Self::signer_weight(&env, &a);
+            }
+        }
+        if proposal.rejections >= quorum
+            && proposal.approvals + remaining_weight < quorum
+        {
             proposal.status = TxStatus::Rejected;
         }
         env.storage().persistent().set(&DataKey::QuorumProposal(id), &proposal);
@@ -421,9 +462,13 @@ impl MultisigContract {
             }
             RotationAction::Remove => {
                 let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
-                // After removal the list would have approvers.len() - 1 members.
-                // If that is less than quorum the threshold becomes unreachable.
-                if approvers.len() as u32 <= quorum {
+                // Quorum is a weight threshold: after removing this signer the
+                // remaining total weight must still be able to reach it
+                // (issue #1142 / SC-137 — the old count-based check ignored
+                // signer weights entirely).
+                let remaining_weight = Self::total_signer_weight(&env)
+                    .saturating_sub(Self::signer_weight(&env, &rotation.signer));
+                if remaining_weight < quorum {
                     panic!("Cannot remove: threshold would be unreachable");
                 }
                 // Rebuild the approvers list without the target signer.
@@ -434,6 +479,12 @@ impl MultisigContract {
                     }
                 }
                 approvers = new_approvers;
+                // Drop the removed signer's weight so a later re-add starts
+                // from the default instead of resurrecting a stale weight
+                // (issue #1143 / SC-138: "removed signers' weights persist").
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::SignerWeight(rotation.signer.clone()));
             }
         }
 
@@ -531,6 +582,17 @@ impl MultisigContract {
             .unwrap_or(DEFAULT_SIGNER_WEIGHT)
     }
 
+    /// Sum of the current signers' weights — the largest reachable quorum
+    /// and the unit basis for quorum validation (issue #1142 / SC-137).
+    fn total_signer_weight(env: &Env) -> u32 {
+        let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
+        let mut total: u32 = 0;
+        for a in approvers.iter() {
+            total += Self::signer_weight(env, &a);
+        }
+        total
+    }
+
     // ── Issue #760: Off-chain signature aggregation ───────────────────────────
 
     /// Set the signing weight for an approver. Admin only.
@@ -552,7 +614,26 @@ impl MultisigContract {
         if weight == 0 { panic!("Weight must be positive"); }
         if weight > MAX_SIGNER_WEIGHT { panic!("Weight exceeds maximum"); }
         Self::assert_is_approver(&env, &signer);
-        env.storage().persistent().set(&DataKey::SignerWeight(signer), &weight);
+        let old_weight = Self::signer_weight(&env, &signer);
+        env.storage().persistent().set(&DataKey::SignerWeight(signer.clone()), &weight);
+        // Weight changes take effect immediately — emit an event so the other
+        // signers and off-chain indexers can observe the governance change
+        // (issue #1142 / SC-137).
+        env.events().publish(
+            (Symbol::new(&env, "SignerWeightChanged"),),
+            EvtSignerWeightChanged {
+                signer,
+                old_weight,
+                new_weight: weight,
+                changed_at: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Read the current weight of a signer (defaults to
+    /// `DEFAULT_SIGNER_WEIGHT` when never set).
+    pub fn get_signer_weight(env: Env, signer: Address) -> u32 {
+        Self::signer_weight(&env, &signer)
     }
 
     /// Deterministic SHA-256 digest an off-chain signer signs to approve a

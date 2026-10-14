@@ -95,10 +95,10 @@ Numbered issues from the original project. Contract numbers in brackets map to
 - #1141: [SC-136] multisig-approval: `execute()` only marks proposals `Expired`, and approved proposals never move funds
 
 <!-- handsoff-issue-1142 -->
-- #1142: [SC-137] multisig-approval: the admin can instantly change signer weights to override quorum, and quorum mixes "count" and "weight" units
+- #1142: [SC-137] multisig-approval: the admin can instantly change signer weights to override quorum, and quorum mixes "count" and "weight" units — **partially fixed**: all voting paths (`reject`, quorum-change approve/reject, signer-removal floor) now use weight units consistently, weight changes emit a `SignerWeightChanged` event, and `get_signer_weight` was added. Remaining: weight changes are still instantaneous admin actions (a deliberate design choice codified by the #1055/#1056 tests, since the contract holds no funds) — routing them through the 72h rotation time-lock is an open design decision.
 
 <!-- handsoff-issue-1143 -->
-- #1143: [SC-138] multisig-approval: `reject_quorum_change` can underflow after a signer is removed, and removed signers' votes and weights persist
+- #1143: [SC-138] multisig-approval: `reject_quorum_change` can underflow after a signer is removed, and removed signers' votes and weights persist — **fixed**: remaining-voter headroom is now computed as a weight sum over the current signer set (no subtraction to underflow), and `execute_signer_change` clears a removed signer's `SignerWeight` so a later re-add cannot resurrect it. Residual: vote *accumulators* on pre-existing proposals still include since-removed signers' votes (fixing that requires a storage-schema change).
 
 <!-- handsoff-issue-1144 -->
 - #1144: [SC-139] recurring-payments: each schedule stores an `asset`, but `execute_payment` always pays in the contract-wide token — **fixed**: `execute_payment` now pulls the payment and fee in `schedule.asset`; regression tests in `contracts/recurring-payments/src/test.rs` (`test_execute_payment_*_schedule_asset*`)

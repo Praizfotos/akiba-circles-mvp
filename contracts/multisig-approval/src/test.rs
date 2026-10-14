@@ -949,6 +949,205 @@ fn test_execute_with_signatures_enforces_weighted_quorum() {
     client.execute_with_signatures(&id, &sigs);
 }
 
+// ── #1142 / #1143: weight-unified quorum voting ──────────────────────────────
+
+/// SC-137: rejection must count *weight*, not votes. Five signers, quorum 5;
+/// three weight-2 rejections carry quorum. Pre-fix the vote count (3) never
+/// reached the weight threshold and the proposal stayed Pending forever even
+/// though approval had become unreachable.
+#[test]
+fn test_reject_counts_weight_not_votes() {
+    let (env, contract_id, approvers, admin) = setup(5, 5);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    for i in 0u32..3 {
+        client.set_signer_weight(&admin, &approvers.get(i).unwrap(), &2);
+    }
+
+    let id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+    client.reject(&approvers.get(0).unwrap(), &id);
+    client.reject(&approvers.get(1).unwrap(), &id);
+    // Rejection weight 4 < quorum 5 → still pending.
+    assert_eq!(client.get_proposal(&id).status, TxStatus::Pending);
+
+    client.reject(&approvers.get(2).unwrap(), &id); // weight 6 >= quorum 5
+    assert_eq!(client.get_proposal(&id).status, TxStatus::Rejected);
+}
+
+/// SC-137: quorum-change rejection must evaluate remaining *weight*.
+/// 4 signers, quorum 3, a0 weight 3. After a1..a3 reject, a0's weight alone
+/// can still reach quorum → proposal stays Pending and a0 executes it.
+/// Pre-fix the count-based remaining headroom (1 < quorum 3) wrongly marked
+/// the proposal Rejected, locking out a reachable change.
+#[test]
+fn test_reject_quorum_change_remaining_uses_weight() {
+    let (env, contract_id, approvers, admin) = setup(3, 4);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &3);
+
+    let id = client.propose_quorum_change(&approvers.get(1).unwrap(), &2);
+    client.reject_quorum_change(&approvers.get(1).unwrap(), &id);
+    client.reject_quorum_change(&approvers.get(2).unwrap(), &id);
+    client.reject_quorum_change(&approvers.get(3).unwrap(), &id);
+    // Remaining weight: a0 = 3 >= quorum 3 → approval still reachable.
+    assert_eq!(client.get_quorum_proposal(&id).status, TxStatus::Pending);
+
+    client.approve_quorum_change(&approvers.get(0).unwrap(), &id);
+    assert_eq!(client.get_quorum_proposal(&id).status, TxStatus::Executed);
+}
+
+/// SC-138: signer removals must not underflow `reject_quorum_change`.
+/// 6 signers, quorum 3: 5 votes cast (2 approve / 3 reject) leave the
+/// proposal Pending; the three rejecters are then removed via the time-locked
+/// rotation. The final unvoted signer rejects — pre-fix this panicked with a
+/// u32 subtraction overflow (and would wrap silently in a release build).
+#[test]
+fn test_reject_quorum_change_no_underflow_after_removal() {
+    let (env, contract_id, approvers, admin) = setup(3, 6);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    // Keep the quorum proposal alive across the three 72h rotation locks.
+    client.update_proposal_ttl(&admin, &(86_400u64 * 30));
+
+    let id = client.propose_quorum_change(&approvers.get(0).unwrap(), &2);
+    client.approve_quorum_change(&approvers.get(0).unwrap(), &id);
+    client.approve_quorum_change(&approvers.get(1).unwrap(), &id);
+    client.reject_quorum_change(&approvers.get(2).unwrap(), &id);
+    client.reject_quorum_change(&approvers.get(3).unwrap(), &id);
+    client.reject_quorum_change(&approvers.get(4).unwrap(), &id);
+    assert_eq!(client.get_quorum_proposal(&id).status, TxStatus::Pending);
+
+    for i in 2u32..5 {
+        client.propose_signer_change(&RotationAction::Remove, &approvers.get(i).unwrap());
+        env.ledger().with_mut(|l| l.timestamp += 259_201);
+        client.execute_signer_change();
+    }
+
+    client.reject_quorum_change(&approvers.get(5).unwrap(), &id);
+    assert_eq!(client.get_quorum_proposal(&id).status, TxStatus::Rejected);
+}
+
+/// SC-138: a removed signer's weight must not resurrect on re-add.
+#[test]
+fn test_removed_signer_weight_cleared_on_rotation() {
+    let (env, contract_id, approvers, admin) = setup(2, 4);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let target = approvers.get(3).unwrap();
+
+    client.set_signer_weight(&admin, &target, &2);
+    assert_eq!(client.get_signer_weight(&target), 2);
+
+    client.propose_signer_change(&RotationAction::Remove, &target);
+    env.ledger().with_mut(|l| l.timestamp += 259_201);
+    client.execute_signer_change();
+    assert_eq!(client.get_signer_weight(&target), 1);
+
+    client.propose_signer_change(&RotationAction::Add, &target);
+    env.ledger().with_mut(|l| l.timestamp += 259_201);
+    client.execute_signer_change();
+    // The stale weight-2 must NOT come back with the re-add.
+    assert_eq!(client.get_signer_weight(&target), 1);
+}
+
+/// SC-137: signer removal must respect weight reachability, not headcount.
+/// 3 signers, quorum 3, weights 3/1/1: removing the weight-3 signer leaves
+/// total weight 2 < quorum 3 → blocked. (The old count check would also block
+/// this, but only by accident of headcount.)
+#[test]
+#[should_panic(expected = "Cannot remove: threshold would be unreachable")]
+fn test_remove_signer_checks_weight_reachability() {
+    let (env, contract_id, approvers, admin) = setup(3, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &3);
+
+    client.propose_signer_change(&RotationAction::Remove, &approvers.get(0).unwrap());
+    env.ledger().with_mut(|l| l.timestamp += 259_201);
+    client.execute_signer_change();
+}
+
+/// SC-137: the flip side — a removal that keeps the weight threshold
+/// reachable must be allowed even at the headcount floor. 3 signers,
+/// quorum 3, weights 3/2/2: removing the weight-3 signer leaves 4 >= quorum.
+/// Pre-fix the count check (`len <= quorum`) panicked and bricked the
+/// rotation even though the threshold stayed reachable.
+#[test]
+fn test_remove_signer_allows_weight_safe_removal_at_count_floor() {
+    let (env, contract_id, approvers, admin) = setup(3, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &3);
+    client.set_signer_weight(&admin, &approvers.get(1).unwrap(), &2);
+    client.set_signer_weight(&admin, &approvers.get(2).unwrap(), &2);
+
+    client.propose_signer_change(&RotationAction::Remove, &approvers.get(0).unwrap());
+    env.ledger().with_mut(|l| l.timestamp += 259_201);
+    client.execute_signer_change(); // must not panic
+
+    // The two survivors (weights 2+2) can still reach quorum 3.
+    let tx_id = propose(&env, &contract_id, &approvers.get(1).unwrap());
+    client.approve(&approvers.get(1).unwrap(), &tx_id);
+    client.approve(&approvers.get(2).unwrap(), &tx_id);
+    assert_eq!(client.get_proposal(&tx_id).status, TxStatus::Executed);
+}
+
+/// SC-137: quorum changes are validated against total weight, so a
+/// weight-inflated signer set can still express a higher threshold.
+#[test]
+fn test_propose_quorum_change_validates_against_total_weight() {
+    let (env, contract_id, approvers, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    // Weights 2,1,1 → total weight 4 > signer count 3.
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &2);
+
+    // Pre-fix this panicked: 4 > approvers.len() (3).
+    let id = client.propose_quorum_change(&approvers.get(1).unwrap(), &4);
+    assert_eq!(client.get_quorum_proposal(&id).status, TxStatus::Pending);
+}
+
+#[test]
+#[should_panic(expected = "invalid quorum")]
+fn test_propose_quorum_change_above_total_weight_panics() {
+    let (env, contract_id, approvers, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &2); // total 4
+    client.propose_quorum_change(&approvers.get(1).unwrap(), &5);
+}
+
+/// SC-137: weight changes take effect immediately — they must at least be
+/// observable on-chain so the other signers and indexers can react.
+#[test]
+fn test_set_signer_weight_emits_event() {
+    use soroban_sdk::{testutils::Events as _, TryFromVal};
+    let (env, contract_id, approvers, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &7);
+
+    let events = env.events().all();
+    let found = events.iter().find(|(_, topics, _)| {
+        topics.iter().any(|topic| {
+            soroban_sdk::Symbol::try_from_val(&env, &topic)
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "SignerWeightChanged"))
+                .unwrap_or(false)
+        })
+    });
+    assert!(found.is_some(), "SignerWeightChanged event not emitted");
+
+    let (_, _, data) = found.unwrap();
+    let payload: EvtSignerWeightChanged = soroban_sdk::from_val(&env, data);
+    assert_eq!(payload.signer, approvers.get(0).unwrap());
+    assert_eq!(payload.old_weight, 1);
+    assert_eq!(payload.new_weight, 7);
+}
+
+#[test]
+fn test_get_signer_weight_defaults_and_updates() {
+    let (env, contract_id, approvers, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let signer = approvers.get(0).unwrap();
+
+    assert_eq!(client.get_signer_weight(&signer), 1);
+    client.set_signer_weight(&admin, &signer, &50);
+    assert_eq!(client.get_signer_weight(&signer), 50);
+}
+
 // ── #1053: replay protection for execute_with_signatures ─────────────────────
 
 #[test]

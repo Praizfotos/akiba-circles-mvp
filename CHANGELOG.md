@@ -10,6 +10,38 @@ Breaking changes are marked **[BREAKING]**.
 
 ## [Unreleased]
 
+### Fixed — `multisig-approval` quorum voting unified on weight units (SC-137/SC-138, issues #1142/#1143)
+
+- `contracts/multisig-approval/src/lib.rs`:
+  - `reject` and `reject_quorum_change`/`approve_quorum_change` now count
+    **weight**, not votes — previously a set of low-weight signers could never
+    reject a proposal whose quorum was expressed in weight, and count-based
+    remaining headroom could wrongly kill a still-reachable quorum change.
+  - `reject_quorum_change` remaining-voter headroom is computed as a weight
+    sum over the current signer set — the old
+    `approvers.len() - approvals - rejections` subtraction underflowed (u32)
+    once signer removals shrank the list below votes cast (SC-138).
+  - `execute_signer_change` (Remove) checks **weight** reachability (allowing
+    safe removals the old headcount check wrongly blocked at the `len ==
+    quorum` floor) and clears the removed signer's `SignerWeight` so a re-add
+    cannot resurrect a stale weight.
+  - `propose_quorum_change` validates `new_quorum` against total signer
+    weight, not signer count.
+  - `set_signer_weight` now emits `SignerWeightChanged`; new
+    `get_signer_weight` getter. (Weight changes remain instantaneous admin
+    actions — deliberate design, documented in KNOWN_ISSUES.)
+- 10 regression tests added (`test_reject_counts_weight_not_votes`,
+  `test_reject_quorum_change_remaining_uses_weight`,
+  `test_reject_quorum_change_no_underflow_after_removal`,
+  `test_removed_signer_weight_cleared_on_rotation`,
+  `test_remove_signer_checks_weight_reachability`,
+  `test_remove_signer_allows_weight_safe_removal_at_count_floor`,
+  `test_propose_quorum_change_validates_against_total_weight`,
+  `test_propose_quorum_change_above_total_weight_panics`,
+  `test_set_signer_weight_emits_event`,
+  `test_get_signer_weight_defaults_and_updates`); all fail against the
+  previous implementation where applicable. 91/91 green.
+
 ### Fixed — `recurring-payments` pays in the schedule's asset (SC-139, issue #1144)
 
 - `contracts/recurring-payments/src/lib.rs` — `execute_payment` now pulls the
